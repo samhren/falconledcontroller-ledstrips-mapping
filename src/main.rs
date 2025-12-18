@@ -119,13 +119,31 @@ impl eframe::App for MyApp {
             ui.horizontal(|ui| {
                 ui.heading("Lightspeed");
                 ui.separator();
-                ui.label(egui::RichText::new(format!("Beat: {}", self.engine.current_beat)).color(egui::Color32::LIGHT_GRAY)); // Placeholder
                 
-                // Beat Indicator
-                let bpm = self.engine.get_bpm();
+                // Unified Sync Status
+                let (source, bpm) = self.engine.get_sync_info();
+                let source_color = if source.starts_with("LINK") { egui::Color32::GREEN } 
+                                   else if source == "AUDIO" { egui::Color32::from_rgb(100, 200, 255) } // Cyan/Blue
+                                   else { egui::Color32::LIGHT_GRAY };
+                
+                ui.label(egui::RichText::new(source).color(source_color).strong());
+                
                 let beat = self.engine.get_beat();
                 let beat_in_bar = ((beat % 4.0).floor() as i32) + 1;
-                ui.label(egui::RichText::new(format!("BPM: {:.1} | Beat: {}", bpm, beat_in_bar)).size(18.0).color(egui::Color32::GREEN));
+                
+                // Beat Indicator using progress bar or text
+                // Let's use text for now as requested "transparent"
+                ui.separator();
+                ui.label(egui::RichText::new(format!("{:.1} BPM", bpm)).size(18.0).strong());
+                ui.label(egui::RichText::new(format!("Beat: {}", beat_in_bar)).size(18.0));
+                
+                // Small visual metronome?
+                let phase = beat.fract();
+                if phase < 0.2 {
+                    ui.label("🔴");
+                } else {
+                    ui.label("⚪");
+                }
 
                 ui.separator();
 
@@ -150,17 +168,17 @@ impl eframe::App for MyApp {
                             });
                             ui.horizontal(|ui| {
                                  ui.label("Audio Latency (ms)");
-                                 ui.add(egui::Slider::new(&mut self.engine.latency_ms, -200.0..=500.0));
+                                 ui.add(egui::Slider::new(&mut self.state.audio.latency_ms, -200.0..=500.0));
                             });
                             ui.horizontal(|ui| {
-                                 ui.checkbox(&mut self.engine.use_flywheel, "Beat Smoothing (Flywheel)");
+                                 ui.checkbox(&mut self.state.audio.use_flywheel, "Beat Smoothing (Flywheel)");
                             });
                             ui.separator();
                             ui.label("Hybrid Sync (Audio)");
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.engine.hybrid_sync, "Enable Audio Snap");
-                                if self.engine.hybrid_sync {
-                                     ui.add(egui::Slider::new(&mut self.engine.audio_sensitivity, 0.0..=1.0).text("Sens"));
+                                ui.checkbox(&mut self.state.audio.hybrid_sync, "Enable Audio Snap");
+                                if self.state.audio.hybrid_sync {
+                                     ui.add(egui::Slider::new(&mut self.state.audio.sensitivity, 0.0..=1.0).text("Sens"));
                                 }
                             });
                         });
@@ -401,13 +419,13 @@ impl eframe::App for MyApp {
                                     if m.mask_type == "scanner" {
                                         // Width
                                         let mut w = m.params.get("width").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                                        if ui.add(egui::Slider::new(&mut w, 0.0..=5.0).text("Width")).changed() {
+                                        if ui.add(egui::Slider::new(&mut w, 0.0..=50.0).text("Width")).changed() {
                                             m.params.insert("width".into(), w.into());
                                             needs_save = true;
                                         }
                                         // Height
                                         let mut h = m.params.get("height").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                                        if ui.add(egui::Slider::new(&mut h, 0.0..=5.0).text("Height")).changed() {
+                                        if ui.add(egui::Slider::new(&mut h, 0.0..=50.0).text("Height")).changed() {
                                             m.params.insert("height".into(), h.into());
                                             needs_save = true;
                                         }
@@ -1095,11 +1113,13 @@ impl eframe::App for MyApp {
                                                   let mut new_h_scr = h_scr;
                                                   let mut shift_lx_scr = 0.0;
                                                   let mut shift_ly_scr = 0.0;
-                                                  match edge_idx { 0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = ldy_scr / 2.0; },
-                                                                   1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = ldx_scr / 2.0; },
-                                                                   2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = ldy_scr / 2.0; },
-                                                                   3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = ldx_scr / 2.0; },
-                                                                   _ => {} }
+                                                  match edge_idx { 
+                                                      0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = -(new_h_scr - h_scr) / 2.0; },
+                                                      1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = (new_w_scr - w_scr) / 2.0; },
+                                                      2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = (new_h_scr - h_scr) / 2.0; },
+                                                      3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = -(new_w_scr - w_scr) / 2.0; },
+                                                      _ => {} 
+                                                  }
                                                   let new_w = new_w_scr / (rect.width() * self.view.scale);
                                                   let new_h = new_h_scr / (rect.height() * self.view.scale);
                                                   m.params.insert("width".to_string(), new_w.into());
@@ -1137,11 +1157,13 @@ impl eframe::App for MyApp {
                                               let mut new_h_scr = h_scr;
                                               let mut shift_lx_scr = 0.0;
                                               let mut shift_ly_scr = 0.0;
-                                              match edge_idx { 0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = ldy_scr / 2.0; },
-                                                               1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = ldx_scr / 2.0; },
-                                                               2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = ldy_scr / 2.0; },
-                                                               3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = ldx_scr / 2.0; },
-                                                               _ => {} }
+                                              match edge_idx { 
+                                                  0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = -(new_h_scr - h_scr) / 2.0; },
+                                                  1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = (new_w_scr - w_scr) / 2.0; },
+                                                  2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = (new_h_scr - h_scr) / 2.0; },
+                                                  3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = -(new_w_scr - w_scr) / 2.0; },
+                                                  _ => {} 
+                                              }
                                               let new_w = new_w_scr / (rect.width() * self.view.scale);
                                               let new_h = new_h_scr / (rect.height() * self.view.scale);
                                               m.params.insert("width".to_string(), new_w.into());
@@ -1477,6 +1499,8 @@ fn color_picker(ui: &mut egui::Ui, rgb: &mut [u8; 3]) -> bool {
     let mut arr = [rgb[0], rgb[1], rgb[2]];
     let resp = ui.color_edit_button_srgb(&mut arr);
     if resp.changed() {
+        println!("Color picker changed: [{}, {}, {}] -> [{}, {}, {}]",
+                 rgb[0], rgb[1], rgb[2], arr[0], arr[1], arr[2]);
         *rgb = arr;
         true
     } else { false }

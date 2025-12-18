@@ -4,9 +4,64 @@
       "id": 0,
       "universe": 1,
       "start_channel": 1,
-      "pixel_count": 80,
+      "pixel_count": 129,
       "x": 0.66231626,
-      "y": 0.88658786,
+      "y": 0.6,
+      "spacing": 0.05,
+      "rotation": 0.0,
+      "color_order": "RGB"
+    },
+    {
+      "id": 1,
+      "universe": 2,
+      "start_channel": 1,
+      "pixel_count": 129,
+      "x": 0.66231626,
+      "y": 0.5,
+      "spacing": 0.05,
+      "rotation": 0.0,
+      "color_order": "RGB"
+    },
+    {
+      "id": 2,
+      "universe": 3,
+      "start_channel": 1,
+      "pixel_count": 129,
+      "x": 0.66231626,
+      "y": 0.4,
+      "spacing": 0.05,
+      "rotation": 0.0,
+      "color_order": "RGB"
+    },
+    {
+      "id": 3,
+      "universe": 4,
+      "start_channel": 1,
+      "pixel_count": 129,
+      "x": 0.66231626,
+      "y": 0.3,
+      "spacing": 0.05,
+      "rotation": 0.0,
+      "color_order": "RGB"
+    },
+    {
+      "id": 5,
+      "universe": 5,
+      "start_channel": 1,
+      "pixel_count": 129,
+      "x": 0.66,
+      "y": 0.1,
+      "spacing": 0.05,
+      "rotation": 0.0,
+      "color_order": "RGB"
+    },
+    {
+      "id": 17577756270169621131,
+      "universe": 6,
+      "start_channel": 1,
+      "pixel_count": 129,
+      "x": 0.66,
+      "y": 0.2,
       "spacing": 0.05,
       "rotation": 0.0,
       "color_order": "RGB"
@@ -30,41 +85,49 @@
               255,
               255
             ],
-            "width": 0.3,
             "speed": 1.0,
+            "width": 0.3,
             "height": 0.3
           }
         }
       ],
       "global": {
-        "kind": "Rainbow",
-        "params": {}
+        "kind": "Solid",
+        "params": {
+          "speed": 0.5,
+          "color": [
+            255,
+            255,
+            255
+          ]
+        }
       }
     },
     {
       "id": 3656755494743042563,
-      "name": "Scene 2",
+      "name": "Blue Horizontal",
       "kind": "Masks",
       "masks": [
         {
           "id": 3022907389976888771,
           "mask_type": "scanner",
-          "x": 2.6984818,
-          "y": 0.8997641,
+          "x": 3.8626513,
+          "y": 0.19206883,
           "params": {
-            "hard_edge": false,
+            "motion": "Linear",
             "rotation": 0.0,
+            "height": 1.705062747001648,
+            "hard_edge": false,
+            "sync": true,
             "color": [
               0,
-              255,
+              15,
               255
             ],
+            "rate": "1 Bar",
             "speed": 1.0,
-            "height": 0.2896726727485657,
             "bar_width": 0.58,
-            "width": 4.715487957000732,
-            "sync": true,
-            "rate": "1 Bar"
+            "width": 6.402764320373535
           }
         }
       ],
@@ -72,27 +135,56 @@
     },
     {
       "id": 6406027995859534812,
-      "name": "Flash BPM",
+      "name": "Flash White",
       "kind": "Global",
       "masks": [],
       "global": {
         "kind": "Flash",
         "params": {
-          "speed": 0.2,
-          "decay": 3.0,
-          "rate": "1/4",
           "color": [
-            184,
             255,
-            0
-          ]
+            255,
+            255
+          ],
+          "decay": 6.2,
+          "rate": "1/4",
+          "speed": 0.2
         }
       }
+    },
+    {
+      "id": 4460136836759193389,
+      "name": "White Vertical",
+      "kind": "Masks",
+      "masks": [
+        {
+          "id": 4722849681656745303,
+          "mask_type": "scanner",
+          "x": 3.5102587,
+          "y": 0.35,
+          "params": {
+            "height": 7.875619888305664,
+            "speed": 1.0,
+            "start_pos": "Right",
+            "color": [
+              255,
+              255,
+              255
+            ],
+            "rate": "1 Bar",
+            "sync": true,
+            "bar_width": 0.08,
+            "width": 0.5460519194602966,
+            "rotation": 90.0
+          }
+        }
+      ],
+      "global": null
     }
   ],
   "selected_scene_id": 6406027995859534812,
   "network": {
-    "use_multicast": true,
+    "use_multicast": false,
     "unicast_ip": "192.168.1.50",
     "universe": 1
   },

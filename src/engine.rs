@@ -24,6 +24,16 @@ pub struct LightingEngine {
     last_update: std::time::Instant,
     sync_error_timer: f32, // How long we've been out of sync
     sync_mode: bool, // true if locked, false if drifting/error
+
+    // Audio BPM
+    last_tap_time: Option<Instant>,
+    tap_intervals: Vec<f64>,
+    pub audio_bpm: f64,
+
+    // Audio Snap Phase Tracking
+    last_audio_beat_time: Option<Instant>,
+    phase_error: f64, // How far off we are from audio beats (in beats)
+    phase_correction_rate: f64, // How fast we correct (beats per second)
 }
 
 impl LightingEngine {
@@ -63,11 +73,23 @@ impl LightingEngine {
             last_update: Instant::now(),
             sync_error_timer: 0.0,
             sync_mode: true,
+            last_tap_time: None,
+            tap_intervals: Vec::new(),
+            audio_bpm: 0.0,
+            last_audio_beat_time: None,
+            phase_error: 0.0,
+            phase_correction_rate: 0.5, // Correct half a beat per second when out of sync
         }
     }
 
     pub fn update(&mut self, state: &mut AppState) {
 
+
+        // Sync Audio Params from State
+        self.latency_ms = state.audio.latency_ms;
+        self.use_flywheel = state.audio.use_flywheel;
+        self.hybrid_sync = state.audio.hybrid_sync;
+        self.audio_sensitivity = state.audio.sensitivity;
 
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f64();
@@ -91,7 +113,8 @@ impl LightingEngine {
         self.current_beat = (phase.floor() as u8 % 4) + 1;
         
         let tempo = session_state.tempo();
-        
+        let link_peers = self.link.num_peers();
+
         // Hybrid Sync / Audio logic
         let mut force_snap = false;
         if let Some(audio) = &self.audio_listener {
@@ -102,46 +125,135 @@ impl LightingEngine {
                      log::warn!("Audio mutex poisoned, recovering");
                      *poisoned.into_inner()
                  });
-             
+
              // Detect Peak using Sensitivity
              // Sensitivity 0.0 = Need HUGE volume (Threshold 1.0)
              // Sensitivity 1.0 = React to silence (Threshold 0.0)
-             // Let's map Sensitivity 0..1 to Threshold 0.5 .. 0.01 
+             // Let's map Sensitivity 0..1 to Threshold 0.5 .. 0.01
              let threshold = 0.5 - (self.audio_sensitivity * 0.45);
-             
+
              let is_peaking = vol > threshold;
-             
+
              // Rising Edge Detection
              if is_peaking && !self.was_peaking {
                  // AUDIO HIT!
+
+                 let now_t = Instant::now();
+
+                 // 1. Audio BPM Detection (Tap Tempo)
+                 if let Some(last) = self.last_tap_time {
+                     let delta = now_t.duration_since(last).as_secs_f64();
+                     // Filter reasonable range: 30 BPM (2.0s) to 200 BPM (0.3s)
+                     if delta > 0.3 && delta < 2.0 {
+                         self.tap_intervals.push(delta);
+                         if self.tap_intervals.len() > 8 {
+                             self.tap_intervals.remove(0);
+                         }
+
+                         // Average with outlier filtering
+                         let mut sorted = self.tap_intervals.clone();
+                         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                         // Use median or trimmed mean for better accuracy
+                         let mid = sorted.len() / 2;
+                         let avg_interval = if sorted.len() > 3 {
+                             // Use middle 50% of values
+                             let start = sorted.len() / 4;
+                             let end = 3 * sorted.len() / 4;
+                             sorted[start..end].iter().sum::<f64>() / (end - start) as f64
+                         } else {
+                             sorted[mid]
+                         };
+
+                         self.audio_bpm = 60.0 / avg_interval;
+                     } else if delta > 2.0 {
+                         // Reset if too long silence
+                         self.tap_intervals.clear();
+                     }
+                 }
+                 self.last_tap_time = Some(now_t);
+
                  if self.hybrid_sync {
-                     // Check if we are close to a beat?
-                     // If we are at 1.9, and hit comes, snap to 2.0.
-                     // If we are at 2.1, snap to 2.0.
-                     let current_phase = self.flywheel_beat.fract(); 
-                     // fract() is 0.0 to 0.999.
-                     // Near beat means near 0.0 or near 1.0.
-                     
-                     let dist_to_next = 1.0 - current_phase;
-                     let dist_to_prev = current_phase;
-                     
-                     let snap_tolerance = 0.35; // Broad window (hit must be roughly near beat)
-                     
-                     if dist_to_prev < snap_tolerance {
-                         // We are just past the beat (e.g. 2.1). Snap back to 2.0
-                         let target = self.flywheel_beat.floor();
-                         self.flywheel_beat = target;
-                         force_snap = true;
-                     } else if dist_to_next < snap_tolerance {
-                         // We are nearing the beat (e.g. 1.9). Snap fwd to 2.0
-                         let target = self.flywheel_beat.ceil();
-                         self.flywheel_beat = target;
-                         force_snap = true;
+                     // NEW APPROACH: Track expected beat time and calculate phase error
+
+                     // Get current effective BPM
+                     let current_bpm = if self.link.num_peers() > 0 {
+                         tempo
+                     } else if self.audio_bpm > 30.0 {
+                         self.audio_bpm
+                     } else {
+                         120.0 * self.speed as f64
+                     };
+
+                     if current_bpm > 30.0 {
+                         // Calculate where we SHOULD be based on last confirmed audio beat
+                         if let Some(last_audio_time) = self.last_audio_beat_time {
+                             let time_since_last = now_t.duration_since(last_audio_time).as_secs_f64();
+                             let expected_beats_elapsed = (current_bpm / 60.0) * time_since_last;
+
+                             // Check if this hit is close to a beat boundary
+                             let beats_to_nearest = expected_beats_elapsed.fract();
+                             let dist_to_next = 1.0 - beats_to_nearest;
+                             let dist_to_prev = beats_to_nearest;
+
+                             // Tighter tolerance - only accept hits near actual beats
+                             let beat_window = 0.25; // 25% of a beat on either side
+
+                             if dist_to_prev < beat_window || dist_to_next < beat_window {
+                                 // This is likely a real beat!
+
+                                 // Calculate phase error: difference between expected and actual
+                                 let current_phase = self.flywheel_beat.fract();
+
+                                 // Determine which beat boundary we're snapping to
+                                 let target_phase = if dist_to_prev < dist_to_next {
+                                     0.0 // Snap to previous beat (just happened)
+                                 } else {
+                                     1.0 // Snap to next beat (about to happen)
+                                 };
+
+                                 // Calculate error (how far off we are)
+                                 let error = if target_phase == 0.0 {
+                                     -current_phase // We're past 0, need to pull back
+                                 } else {
+                                     1.0 - current_phase // We're before 1, need to push forward
+                                 };
+
+                                 // Store the error for gradual correction
+                                 self.phase_error = error;
+
+                                 // Update last confirmed audio beat time
+                                 self.last_audio_beat_time = Some(now_t);
+                             }
+                         } else {
+                             // First audio beat detected - initialize
+                             self.last_audio_beat_time = Some(now_t);
+                             // Snap immediately to nearest beat
+                             let current_phase = self.flywheel_beat.fract();
+                             if current_phase < 0.5 {
+                                 self.flywheel_beat = self.flywheel_beat.floor();
+                             } else {
+                                 self.flywheel_beat = self.flywheel_beat.ceil();
+                             }
+                             force_snap = true;
+                         }
                      }
                  }
              }
              self.was_peaking = is_peaking;
         }
+
+        // Determine effective tempo
+        let effective_tempo = if link_peers > 0 {
+             tempo // Link Tempo
+        } else if self.audio_bpm > 30.0 {
+             self.audio_bpm // Audio Tempo
+        } else {
+             120.0 * self.speed as f64 // Manual Speed (Multiplier on 120 default?) 
+             // Wait, self.speed was "Master Speed" in UI (0.1..5.0).
+             // If we treat manual speed as multiplier on 120, that works.
+             // Or we can add a base tempo field? For now, 120 * speed.
+        };
 
         // Flywheel Logic (only run if we didn't just hard-snap)
         if !self.use_flywheel && !force_snap {
@@ -151,40 +263,73 @@ impl LightingEngine {
             // Predict next beat based on current flywheel + tempo
             // beat = beats/min * min/sec * sec
             // beat_delta = (tempo / 60.0) * dt
-            let predicted_beat = self.flywheel_beat + (tempo / 60.0) * dt;
-            
-            // Check difference
+            // USE EFFECTIVE TEMPO
+            let mut predicted_beat = self.flywheel_beat + (effective_tempo / 60.0) * dt;
+
+            // Apply audio phase correction if hybrid sync is enabled
+            if self.hybrid_sync && self.phase_error.abs() > 0.001 {
+                // Gradually correct the phase error
+                let correction_amount = self.phase_correction_rate * dt;
+                let correction_to_apply = if self.phase_error.abs() < correction_amount {
+                    self.phase_error // Apply remaining error if small
+                } else {
+                    self.phase_error.signum() * correction_amount // Apply partial correction
+                };
+
+                predicted_beat += correction_to_apply;
+                self.phase_error -= correction_to_apply;
+
+                // Decay phase error over time to prevent accumulation
+                self.phase_error *= 0.95; // 5% decay per frame
+            }
+
+            // Check difference with Link (if available)
             let diff = (link_beat - predicted_beat).abs();
-            
+
             // Configurable Thresholds
             let error_threshold = 0.5; // If off by more than half a beat, consider it an error (jump)
             let recovery_time = 1.0; // Seconds to wait before snapping (approx 2 beats at 120bpm)
-            
-            if diff > error_threshold {
-                // Significant deviation
+
+            if diff > error_threshold && link_peers > 0 {
+                // Significant deviation from Link
                 self.sync_error_timer += dt as f32;
                 self.sync_mode = false;
-                
+
                 if self.sync_error_timer > recovery_time {
                     // Snap to link beat
                     self.flywheel_beat = link_beat;
                     self.sync_error_timer = 0.0;
                     self.sync_mode = true;
+                    self.phase_error = 0.0; // Reset audio phase error
                 } else {
                     // Continue drifting/predicting but invalid sync
                     self.flywheel_beat = predicted_beat;
                 }
             } else {
-                // Small deviation - Nudge towards link beat
+                // Small deviation or no Link - use predicted beat
                 self.sync_error_timer = 0.0;
                 self.sync_mode = true;
-                let lerp_factor = 0.1; // Smooth correction
-                self.flywheel_beat = predicted_beat + (link_beat - predicted_beat) * lerp_factor;
+
+                // If Link is available, gently nudge towards it
+                if link_peers > 0 {
+                    let lerp_factor = 0.1; // Smooth correction
+                    self.flywheel_beat = predicted_beat + (link_beat - predicted_beat) * lerp_factor;
+                } else {
+                    // No Link - just use predicted beat (audio-driven or manual)
+                    self.flywheel_beat = predicted_beat;
+                }
             }
         }
 
         // Use flywheel_beat for animations
-        let beat = self.flywheel_beat;
+        // Safety check: ensure beat is valid (not NaN or infinite)
+        let beat = if self.flywheel_beat.is_finite() {
+            self.flywheel_beat
+        } else {
+            log::warn!("Invalid flywheel_beat detected: {}, resetting to 0.0", self.flywheel_beat);
+            self.flywheel_beat = 0.0;
+            0.0
+        };
 
         // 1. Clear all strips
         for strip in &mut state.strips {
@@ -266,12 +411,11 @@ impl LightingEngine {
                  }
              }
         }
+    
         
-        // Send Coalesced Universes
-        if beat.fract() < 0.05 { // Rough throttle
-             // println!("Sending sACN... Universes: {}", universe_data.len());
-        }
-        
+        // Debug: Log color data before sending
+        static mut LAST_COLOR_LOG: f32 = 0.0;
+
         for (u, data) in universe_data {
             if !self.registered_universes.contains(&u) {
                 match self.sender.register_universe(u) {
@@ -295,19 +439,20 @@ impl LightingEngine {
                     None // Fallback
                 }
             };
-            
+
             // Only send if we have a valid config (if Unicast was selected but invalid IP, we might SKIP or fall back)
-            // User code implies we should try to send. 
-            // If !multicast and invalid IP -> dst_ip is None -> Sends Multicast? 
+            // User code implies we should try to send.
+            // If !multicast and invalid IP -> dst_ip is None -> Sends Multicast?
             // Let's explicitly check:
             if !state.network.use_multicast && dst_ip.is_none() {
                 // Invalid Unicast IP, skip or log
                 continue;
             }
-
-            // DEBUG: Print once per second if needed, or just print errors
             // let _ = self.sender.send(&[u], &data, Some(priority), dst_ip, None);
-            match self.sender.send(&[u], &data, Some(priority), dst_ip, None) {
+            let mut fixed_data = vec![0u8]; // Start Code
+            fixed_data.extend_from_slice(&data);
+
+            match self.sender.send(&[u], &fixed_data, Some(200), dst_ip, None) {
                 Ok(_) => {
                     // Success, verbose logging might flood
                 }
@@ -404,16 +549,7 @@ impl LightingEngine {
             let cos_rot = rot_rad.cos();
             let sin_rot = rot_rad.sin();
 
-            // Debug logging
-            static DEBUG_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            let should_log = !DEBUG_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
-            if should_log {
-                println!("\n=== SCANNER DEBUG ===");
-                println!("  width={}, height={}, rotation={}°", width, height, rotation_deg);
-                println!("  cos={}, sin={}", cos_rot, sin_rot);
-                println!("  mask pos=({}, {})", mx, my);
-                println!("  bounds: x=[{}, {}], y=[{}, {}]", -width/2.0, width/2.0, -height/2.0, height/2.0);
-            }
+
 
             // Get bar parameters
             let bar_width = mask.params.get("bar_width").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
@@ -463,29 +599,7 @@ impl LightingEngine {
                 }
             };
 
-            if should_log_detailed {
-                println!("\n=== BAR POSITION DEBUG (t={:.2}) ===", t);
-                println!("  width={:.3}, bar_width={:.3}", width, bar_width);
-                println!("  sweep_range = width/2 - bar_width = {:.3} - {:.3} = {:.3}",
-                         width/2.0, bar_width, sweep_range);
-                println!("  osc_val={:.3}, bar_local_x={:.3}", osc_val, bar_local_x);
-                println!("  Bar center range: [{:.3}, {:.3}]", -sweep_range, sweep_range);
-                println!("  Bar LEFT edge = bar_center - bar_width = {:.3} - {:.3} = {:.3}",
-                         bar_local_x, bar_width, bar_local_x - bar_width);
-                println!("  Bar RIGHT edge = bar_center + bar_width = {:.3} + {:.3} = {:.3}",
-                         bar_local_x, bar_width, bar_local_x + bar_width);
-                println!("  Mask bounds: x=[{:.3}, {:.3}]", -width/2.0, width/2.0);
-                println!("  Bar SHOULD reach edges: [{:.3}, {:.3}]", -width/2.0, width/2.0);
-
-                // Check if bar is at extremes
-                if osc_val < -0.9 {
-                    println!("  >>> AT LEFT EXTREME: bar left edge = {:.3}, mask left = {:.3}, diff = {:.3}",
-                             bar_local_x - bar_width, -width/2.0, (bar_local_x - bar_width) - (-width/2.0));
-                } else if osc_val > 0.9 {
-                    println!("  >>> AT RIGHT EXTREME: bar right edge = {:.3}, mask right = {:.3}, diff = {:.3}",
-                             bar_local_x + bar_width, width/2.0, (bar_local_x + bar_width) - (width/2.0));
-                }
-            }
+            
 
             // Get color
             let m_color = mask.params.get("color").and_then(|v| {
@@ -529,11 +643,6 @@ impl LightingEngine {
                         let near_left_edge = mask_local_x < -half_w + 0.3;
                         let near_right_edge = mask_local_x > half_w - 0.3;
 
-                        if (near_left_edge || near_right_edge) && passes_bounds {
-                            println!("  Strip {} Pixel {}: local_x={:.3}, local_y={:.3}, dist_to_bar={:.3}, in_bar={}, {}",
-                                i, p, mask_local_x, mask_local_y, dist_to_bar, in_bar,
-                                if near_left_edge { "NEAR LEFT EDGE" } else { "NEAR RIGHT EDGE" });
-                        }
                     }
 
                     if (mask_local_x >= -(half_w + EPSILON) && mask_local_x <= (half_w + EPSILON)) &&
@@ -644,23 +753,47 @@ impl LightingEngine {
     pub fn get_time(&self) -> f32 {
         self.start_time.elapsed().as_secs_f32()
     }
+    
+    pub fn get_sync_info(&self) -> (String, f64) {
+        let peers = self.link.num_peers();
+        if peers > 0 {
+             let mut session_state = SessionState::new();
+             self.link.capture_app_session_state(&mut session_state);
+             (format!("LINK ({} Peers)", peers), session_state.tempo())
+        } else if self.audio_bpm > 30.0 {
+             ("AUDIO".to_string(), self.audio_bpm)
+        } else {
+             ("MANUAL".to_string(), 120.0 * self.speed as f64)
+        }
+    }
 }
 
 impl LightingEngine {
     fn apply_global_effect(&self, effect: &GlobalEffect, strips: &mut [PixelStrip], t: f32, beat: f64) {
         match effect.kind.as_str() {
             "Solid" => {
-                let color_arr = effect.params.get("color").and_then(|v| v.as_array());
-                let color = color_arr
-                    .and_then(|arr| Some([
-                        arr.get(0)?.as_u64()? as u8,
-                        arr.get(1)?.as_u64()? as u8,
-                        arr.get(2)?.as_u64()? as u8,
-                    ]))
-                    .unwrap_or([255, 255, 255]);
+                // Use EXACT same color reading as masks
+                let color = effect.params.get("color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8, arr.get(1)?.as_u64()? as u8, arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 255, 255]);
+
+                // Apply color EXACTLY like scanner masks do - with intensity and saturating_add
                 for s in strips.iter_mut() {
                     let cnt = s.pixel_count.min(s.data.len());
-                    for i in 0..cnt { s.data[i] = color; }
+                    for i in 0..cnt {
+                        let intensity = 1.0; // Full intensity for solid colors
+                        let r = (color[0] as f32 * intensity) as u8;
+                        let g = (color[1] as f32 * intensity) as u8;
+                        let b = (color[2] as f32 * intensity) as u8;
+
+                        let curr = s.data[i];
+                        s.data[i] = [
+                            curr[0].saturating_add(r),
+                            curr[1].saturating_add(g),
+                            curr[2].saturating_add(b)
+                        ];
+                    }
                 }
             }
             "Rainbow" => {
@@ -673,57 +806,49 @@ impl LightingEngine {
                 }
             }
             "Flash" => {
-                let color_arr = effect.params.get("color").and_then(|v| v.as_array());
-                let color = color_arr
-                    .and_then(|arr| Some([
-                        arr.get(0)?.as_u64()? as u8,
-                        arr.get(1)?.as_u64()? as u8,
-                        arr.get(2)?.as_u64()? as u8,
-                    ]))
-                    .unwrap_or([255, 255, 255]);
-                
+                // Use EXACT same color reading as masks
+                let color = effect.params.get("color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8, arr.get(1)?.as_u64()? as u8, arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 255, 255]);
+
                 let rate_str = effect.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar");
                 let divisor = match rate_str {
                     "4 Bar" => 16.0, "1 Bar" => 4.0, "1/2" => 2.0, "1/4" => 1.0, "1/8" => 0.5, _ => 4.0,
                 };
-                
+
                 let decay = effect.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
-                
+
                 // Calculate phase 0..1
                 let phase = (beat / divisor).fract();
+
                 // Exponential decay: starts at 1.0, drops quickly
                 // To make it flash *on the beat*, we want peak at phase=0.
-                // (1.0 - phase) is linear decay.
-                // We want sharp decay.
-                // However, phase wraps 0->1.
-                // If phase is 0.0 (just hit), intensity 1.0.
-                // If phase is 0.5, intensity should be low.
                 let intensity = (1.0 - phase).powf(decay) as f32;
-                
-                if intensity > 0.01 {
-                    for s in strips.iter_mut() {
-                        let cnt = s.pixel_count.min(s.data.len());
-                        for i in 0..cnt {
-                             // Mix additive? Or replace? 
-                             // Global usually replaces if it's the only thing. 
-                             // But flash might be cool additive?
-                             // User asked for "flash on bpm". Usually implies a strobe effect.
-                             // Replacing is safer/clearer.
-                             let r = (color[0] as f32 * intensity) as u8;
-                             let g = (color[1] as f32 * intensity) as u8;
-                             let b = (color[2] as f32 * intensity) as u8;
-                             s.data[i] = [r, g, b];
-                        }
+
+                // Clamp to ensure valid range
+                let intensity = intensity.clamp(0.0, 1.0);
+
+                // Debug logging (only occasionally)
+                static mut LAST_FLASH_LOG: f32 = 0.0;
+                unsafe {
+                    if t - LAST_FLASH_LOG > 1.0 {
+                        println!("Flash: beat={:.2}, phase={:.3}, intensity={:.3}, color={:?}, decay={}",
+                                 beat, phase, intensity, color, decay);
+                        LAST_FLASH_LOG = t;
                     }
-                } else {
-                     // Black out (strobe off)
-                     // If we want it to flash *over* something, we'd need mixing, 
-                     // but Global Effect currently *is* the scene content.
-                     // So we write silence.
-                     for s in strips.iter_mut() {
-                        let cnt = s.pixel_count.min(s.data.len());
-                        for i in 0..cnt { s.data[i] = [0, 0, 0]; }
-                     }
+                }
+
+                // Always apply the color with intensity - don't black out
+                // This prevents the "crash to black" issue
+                for s in strips.iter_mut() {
+                    let cnt = s.pixel_count.min(s.data.len());
+                    for i in 0..cnt {
+                        let r = (color[0] as f32 * intensity) as u8;
+                        let g = (color[1] as f32 * intensity) as u8;
+                        let b = (color[2] as f32 * intensity) as u8;
+                        s.data[i] = [r, g, b];
+                    }
                 }
             }
             _ => {}

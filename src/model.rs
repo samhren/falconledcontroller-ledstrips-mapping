@@ -86,6 +86,25 @@ impl Default for NetworkConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AudioConfig {
+    pub latency_ms: f32,
+    pub use_flywheel: bool,
+    pub hybrid_sync: bool,
+    pub sensitivity: f32,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            latency_ms: 0.0,
+            use_flywheel: true,
+            hybrid_sync: false,
+            sensitivity: 0.5,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct AppState {
     pub strips: Vec<PixelStrip>,
@@ -98,4 +117,6 @@ pub struct AppState {
     pub bind_address: Option<String>,
     pub mode: String, // "global", "spatial"
     pub effect: String,
+    #[serde(default)]
+    pub audio: AudioConfig,
 }
