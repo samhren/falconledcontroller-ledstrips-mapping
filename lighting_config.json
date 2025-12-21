@@ -190,35 +190,38 @@
           "x": 0.5,
           "y": 0.5,
           "params": {
-            "height": 0.3,
-            "speed": 1.0,
-            "width": 0.3,
             "color": [
               0,
               255,
               255
-            ]
+            ],
+            "width": 0.3,
+            "speed": 1.0,
+            "height": 0.3
           }
         }
       ],
       "global": {
         "kind": "Rainbow",
         "params": {
-          "life": 0.32000000000000006,
-          "speed": 0.3700000000000001,
-          "speed_lfo_sync": true,
-          "decay": 2.3,
-          "speed_lfo_rate": "4 Bar",
-          "density": 0.03,
-          "speed_lfo_waveform": "sine",
           "color": [
             255,
             255,
             255
           ],
-          "speed_lfo_enabled": false
+          "speed_lfo_waveform": "sine",
+          "life": 0.32000000000000006,
+          "decay": 2.3,
+          "speed_lfo_rate": "4 Bar",
+          "density": 0.03,
+          "speed_lfo_sync": true,
+          "speed_lfo_enabled": false,
+          "speed": 0.3700000000000001
         }
-      }
+      },
+      "launchpad_btn": 25,
+      "launchpad_is_cc": false,
+      "launchpad_color": 46
     },
     {
       "id": 3656755494743042563,
@@ -228,32 +231,32 @@
         {
           "id": 3022907389976888771,
           "mask_type": "scanner",
-          "x": 3.853046,
-          "y": 2.021811,
+          "x": 3.8338768,
+          "y": 1.9364464,
           "params": {
-            "height_lfo_waveform": "sine",
-            "width_lfo_waveform": "sine",
-            "width": 13.023442268371582,
-            "bar_width_lfo_rate": "4 Bar",
-            "height_lfo_enabled": false,
-            "motion": "Linear",
-            "bar_width_lfo_waveform": "triangle",
-            "bar_width_lfo_depth": 1.0,
-            "width_lfo_enabled": false,
-            "bar_width_lfo_enabled": true,
-            "hard_edge": true,
-            "bar_width": 0.58,
-            "bar_width_lfo_sync": true,
-            "speed": 1.0,
             "rotation": 0.0,
-            "height": 6.297971248626709,
+            "motion": "Linear",
+            "bar_width_lfo_rate": "4 Bar",
+            "width_lfo_waveform": "sine",
+            "bar_width_lfo_enabled": true,
+            "bar_width_lfo_sync": true,
+            "bar_width_lfo_waveform": "triangle",
+            "rate": "1 Bar",
+            "bar_width": 0.58,
+            "hard_edge": true,
             "color": [
               0,
               15,
               255
             ],
-            "rate": "1 Bar",
-            "sync": true
+            "height_lfo_enabled": false,
+            "width_lfo_enabled": false,
+            "bar_width_lfo_depth": 1.0,
+            "width": 13.04793930053711,
+            "sync": true,
+            "height": 6.297968864440918,
+            "speed": 1.0,
+            "height_lfo_waveform": "sine"
           }
         },
         {
@@ -262,29 +265,32 @@
           "x": 3.8529751,
           "y": 2.2304518,
           "params": {
-            "sync": true,
-            "bar_width_lfo_waveform": "triangle",
+            "bar_width_lfo_rate": "4 Bar",
+            "bar_width": 0.58,
+            "rate": "1 Bar",
+            "rotation": 180.0,
+            "hard_edge": false,
             "color": [
               255,
               0,
               0
             ],
-            "hard_edge": false,
-            "bar_width_lfo_sync": true,
-            "bar_width": 0.58,
-            "bar_width_lfo_enabled": true,
-            "width": 13.01523780822754,
             "bar_width_lfo_depth": 1.0,
-            "rotation": 180.0,
-            "speed": 1.0,
-            "rate": "1 Bar",
+            "height": 6.790430545806885,
+            "bar_width_lfo_waveform": "triangle",
+            "width": 13.01523780822754,
+            "sync": true,
             "motion": "Linear",
-            "bar_width_lfo_rate": "4 Bar",
-            "height": 6.790430545806885
+            "speed": 1.0,
+            "bar_width_lfo_enabled": true,
+            "bar_width_lfo_sync": true
           }
         }
       ],
-      "global": null
+      "global": null,
+      "launchpad_btn": 48,
+      "launchpad_is_cc": false,
+      "launchpad_color": 9
     },
     {
       "id": 6406027995859534812,
@@ -295,15 +301,18 @@
         "kind": "Flash",
         "params": {
           "speed": 0.2,
-          "rate": "1/4",
           "color": [
             255,
             255,
             255
           ],
-          "decay": 1.0
+          "decay": 1.0,
+          "rate": "1/4"
         }
-      }
+      },
+      "launchpad_btn": null,
+      "launchpad_is_cc": false,
+      "launchpad_color": null
     },
     {
       "id": 4460136836759193389,
@@ -316,24 +325,27 @@
           "x": 4.0784044,
           "y": 1.9598113,
           "params": {
-            "sync": true,
-            "start_pos": "Right",
+            "hard_edge": false,
             "width": 7.045283317565918,
+            "start_pos": "Right",
             "color": [
               255,
               255,
               255
             ],
-            "hard_edge": false,
+            "sync": true,
             "speed": 1.0,
-            "rate": "1 Bar",
-            "rotation": 90.0,
             "height": 13.830557823181152,
-            "bar_width": 0.6900000000000001
+            "rate": "1 Bar",
+            "bar_width": 0.6900000000000001,
+            "rotation": 90.0
           }
         }
       ],
-      "global": null
+      "global": null,
+      "launchpad_btn": null,
+      "launchpad_is_cc": false,
+      "launchpad_color": null
     },
     {
       "id": 12037065891021868092,
@@ -346,18 +358,18 @@
           "x": 3.4115117,
           "y": 0.3440881,
           "params": {
+            "sync": true,
+            "width": 11.260355949401855,
+            "hard_edge": false,
+            "rotation": 45.0,
+            "bar_width": 0.7,
             "rate": "1 Bar",
+            "speed": 1.0,
             "color": [
               0,
               255,
               255
             ],
-            "rotation": 45.0,
-            "hard_edge": false,
-            "bar_width": 0.7,
-            "speed": 1.0,
-            "sync": true,
-            "width": 11.260355949401855,
             "height": 11.616992950439451
           }
         },
@@ -367,25 +379,28 @@
           "x": 3.414527,
           "y": 0.3453073,
           "params": {
-            "height": 11.033242225646973,
-            "width": 11.659222602844238,
             "speed": 1.0,
+            "height": 11.033242225646973,
             "color": [
               0,
               255,
               255
             ],
-            "sync": true,
-            "rotation": 135.0,
             "bar_width": 0.7,
-            "rate": "1 Bar"
+            "rate": "1 Bar",
+            "rotation": 135.0,
+            "width": 11.659222602844238,
+            "sync": true
           }
         }
       ],
-      "global": null
+      "global": null,
+      "launchpad_btn": 55,
+      "launchpad_is_cc": false,
+      "launchpad_color": 49
     }
   ],
-  "selected_scene_id": 12037065891021868092,
+  "selected_scene_id": 3656755494743042563,
   "network": {
     "use_multicast": false,
     "unicast_ip": "192.168.1.50",
@@ -399,5 +414,6 @@
     "use_flywheel": true,
     "hybrid_sync": true,
     "sensitivity": 0.5
-  }
+  },
+  "layout_locked": true
 }

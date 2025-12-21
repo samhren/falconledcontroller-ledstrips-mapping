@@ -1,7 +1,10 @@
+
+
 mod model;
 mod engine;
 mod audio;
 mod scanner;
+mod midi;
 
 use eframe::egui;
 use model::{AppState, PixelStrip, Mask};
@@ -9,8 +12,7 @@ use engine::LightingEngine;
 use std::fs;
 use std::process::Command;
 use std::path::{Path, PathBuf};
-
-// View Transform State
+use std::sync::mpsc::{Sender, Receiver};
 struct ViewState {
     offset: egui::Vec2,
     scale: f32,
@@ -65,6 +67,8 @@ struct MyApp {
     new_scene_name: String,
     new_scene_kind: String, // "Masks" or "Global"
     last_saved_json: String,
+    midi_sender: Sender<midi::MidiCommand>,
+    midi_receiver: Receiver<midi::MidiEvent>,
 }
 
 impl Default for MyApp {
@@ -102,6 +106,26 @@ impl Default for MyApp {
 
         // Initial autosave snapshot
         let snapshot = serde_json::to_string_pretty(&state).unwrap_or_default();
+        
+        // Init MIDI
+        let (tx_event, rx_event) = std::sync::mpsc::channel();
+        let tx_cmd = midi::start_midi_service(tx_event);
+
+        // Send initial colors
+        let _ = tx_cmd.send(midi::MidiCommand::ClearAll);
+        // Small delay to ensure clear processes if needed, but channel order is preserved usually.
+        
+        for s in &state.scenes {
+            if let (Some(btn), Some(col)) = (s.launchpad_btn, s.launchpad_color) {
+                 let cmd = if s.launchpad_is_cc {
+                     midi::MidiCommand::SetButtonColor { cc: btn, color: col }
+                 } else {
+                     midi::MidiCommand::SetPadColor { note: btn, color: col }
+                 };
+                 let _ = tx_cmd.send(cmd);
+            }
+        }
+
         Self {
             state,
             engine: LightingEngine::new(),
@@ -112,6 +136,8 @@ impl Default for MyApp {
             new_scene_name: "New Scene".into(),
             new_scene_kind: "Masks".into(),
             last_saved_json: snapshot,
+            midi_sender: tx_cmd,
+            midi_receiver: rx_event,
         }
     }
 }
@@ -203,8 +229,27 @@ fn reveal_in_file_manager(path: &Path) {
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle MIDI Input
+        while let Ok(event) = self.midi_receiver.try_recv() {
+            match event {
+                midi::MidiEvent::NoteOn { note, velocity: _ } => {
+                     // Check for scene mapped to this note (and is NOT cc)
+                     if let Some(s) = self.state.scenes.iter().find(|s| !s.launchpad_is_cc && s.launchpad_btn == Some(note)) {
+                         self.state.selected_scene_id = Some(s.id);
+                     }
+                }
+                midi::MidiEvent::ControlChange { controller, value: _ } => {
+                     // Check for scene mapped to this CC
+                     if let Some(s) = self.state.scenes.iter().find(|s| s.launchpad_is_cc && s.launchpad_btn == Some(controller)) {
+                         self.state.selected_scene_id = Some(s.id);
+                     }
+                }
+            }
+        }
+
         // Menu Bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Reveal Config in Finder").clicked() {
@@ -391,11 +436,11 @@ impl eframe::App for MyApp {
                                     if ui.button("Create").clicked() {
                                         let id = rand::random();
                                         let scene = if self.new_scene_kind == "Masks" {
-                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Masks".into(), masks: vec![], global: None }
+                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Masks".into(), masks: vec![], global: None, launchpad_btn: None, launchpad_color: None, launchpad_is_cc: false }
                                         } else {
                                             let mut ge = model::GlobalEffect::default();
                                             ge.params.insert("speed".into(), 0.2.into());
-                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Global".into(), masks: vec![], global: Some(ge) }
+                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Global".into(), masks: vec![], global: Some(ge), launchpad_btn: None, launchpad_color: None, launchpad_is_cc: false }
                                         };
                                         self.state.scenes.push(scene);
                                         self.state.selected_scene_id = Some(id);
@@ -408,23 +453,103 @@ impl eframe::App for MyApp {
 
                         // Scenes list with per-scene editors
                         let mut delete_scene_idx: Option<usize> = None;
+                        let mut needs_save = false;
+                        let sender = self.midi_sender.clone();
+                        
+                        // Collect used IDs to prevent duplicates
+                        let mut used_ids = std::collections::HashMap::new();
+                        for s in &self.state.scenes {
+                            if let Some(btn) = s.launchpad_btn {
+                                if btn != 0 {
+                                    used_ids.insert((s.launchpad_is_cc, btn), s.id);
+                                }
+                            }
+                        }
+
                         for (si, scene) in self.state.scenes.iter_mut().enumerate() {
                             ui.push_id(scene.id, |ui| {
                                 ui.separator();
                                 let selected = self.state.selected_scene_id == Some(scene.id);
                                 ui.horizontal(|ui| {
-                                    if ui.selectable_label(selected, &scene.name).clicked() { self.state.selected_scene_id = Some(scene.id); }
+                                    if ui.selectable_label(selected, &scene.name).clicked() {
+                                        self.state.selected_scene_id = Some(scene.id);
+                                    }
                                     ui.text_edit_singleline(&mut scene.name);
-                                    if ui.button("🗑").clicked() { delete_scene_idx = Some(si); }
+                                    if ui.button("X").clicked() { delete_scene_idx = Some(si); }
                                 });
+                                
+                                // Launchpad Config
                                 ui.horizontal(|ui| {
-                                    ui.label("Type:");
-                                    egui::ComboBox::from_id_source(format!("scene_kind_{}", scene.id))
-                                        .selected_text(scene.kind.clone())
-                                        .show_ui(ui, |ui| {
-                                            if ui.selectable_label(scene.kind == "Masks", "Masks").clicked() { scene.kind = "Masks".into(); }
-                                            if ui.selectable_label(scene.kind == "Global", "Global").clicked() { scene.kind = "Global".into(); }
-                                        });
+                                    ui.label("Launchpad:");
+                                    let is_cc = scene.launchpad_is_cc;
+                                    let old_btn = scene.launchpad_btn;
+                                    let send_off = |info: Option<u8>, cc: bool, sender: &Sender<midi::MidiCommand>| {
+                                        if let Some(old) = info {
+                                             let cmd = if cc { midi::MidiCommand::SetButtonColor { cc: old, color: 0 } }
+                                                       else { midi::MidiCommand::SetPadColor { note: old, color: 0 } };
+                                             let _ = sender.send(cmd);
+                                        }
+                                    };
+
+                                    if ui.selectable_label(!is_cc, "Note").clicked() {
+                                        if is_cc { // Changed from CC to Note
+                                            send_off(old_btn, true, &sender);
+                                            scene.launchpad_is_cc = false;
+                                            // Re-send current if exists
+                                            if let (Some(b), Some(c)) = (scene.launchpad_btn, scene.launchpad_color) {
+                                                let _ = sender.send(midi::MidiCommand::SetPadColor { note: b, color: c });
+                                            }
+                                            needs_save = true;
+                                        }
+                                    }
+                                    if ui.selectable_label(is_cc, "CC").clicked() {
+                                        if !is_cc { // Changed from Note to CC
+                                            send_off(old_btn, false, &sender);
+                                            scene.launchpad_is_cc = true;
+                                            // Re-send
+                                            if let (Some(b), Some(c)) = (scene.launchpad_btn, scene.launchpad_color) {
+                                                let _ = sender.send(midi::MidiCommand::SetButtonColor { cc: b, color: c });
+                                            }
+                                            needs_save = true;
+                                        }
+                                    }
+                                    
+                                    let mut val = scene.launchpad_btn.unwrap_or(0);
+                                    if ui.add(egui::DragValue::new(&mut val).prefix("ID: ")).changed() {
+                                        // Validate Duplicate
+                                        let is_dup = if val != 0 {
+                                            if let Some(&owner) = used_ids.get(&(scene.launchpad_is_cc, val)) {
+                                                owner != scene.id
+                                            } else { false }
+                                        } else { false };
+                                        
+                                        if !is_dup {
+                                            // Turn off old
+                                            send_off(old_btn, scene.launchpad_is_cc, &sender);
+                                            
+                                            scene.launchpad_btn = Some(val);
+                                            // Send new
+                                            if let Some(col) = scene.launchpad_color {
+                                                let cmd = if scene.launchpad_is_cc { midi::MidiCommand::SetButtonColor { cc: val, color: col } }
+                                                          else { midi::MidiCommand::SetPadColor { note: val, color: col } };
+                                                let _ = sender.send(cmd);
+                                            }
+                                            needs_save = true;
+                                        }
+                                    }
+                                    
+                                    let mut col = scene.launchpad_color.unwrap_or(0);
+                                    if launchpad_color_picker_ui(ui, &mut col) {
+                                        scene.launchpad_color = Some(col);
+                                        // Send to board immediately
+                                        let cmd = if scene.launchpad_is_cc {
+                                             midi::MidiCommand::SetButtonColor { cc: val, color: col }
+                                        } else {
+                                             midi::MidiCommand::SetPadColor { note: val, color: col }
+                                        };
+                                        let _ = sender.send(cmd);
+                                        needs_save = true;
+                                    }
                                 });
                                 if scene.kind == "Global" {
                                     if scene.global.is_none() { scene.global = Some(model::GlobalEffect::default()); }
@@ -831,12 +956,24 @@ impl eframe::App for MyApp {
                         }
                             });
                         }
-                        if let Some(i) = delete_scene_idx { self.state.scenes.remove(i); }
+                        if let Some(i) = delete_scene_idx {
+                            self.state.scenes.remove(i);
+                            self.save_state(); // Save after delete
+                        }
+                        
+                        if needs_save {
+                            self.save_state();
+                        }
                     });
                 });
 
                 // RIGHT PANEL: CANVAS
                 let canvas_ui = &mut columns[1];
+                
+                canvas_ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.state.layout_locked, "🔒 Lock Layout");
+                });
+
                 let (response, painter) = canvas_ui.allocate_painter(
                     canvas_ui.available_size(), 
                     egui::Sense::click_and_drag()
@@ -1178,7 +1315,7 @@ impl eframe::App for MyApp {
                        }
                        
                        // 3. HIT TEST STRIPS
-                       if !hit {
+                       if !hit && !self.state.layout_locked {
                            for s in &self.state.strips {
                                let dist = ((wx - s.x).powi(2) + (wy - s.y).powi(2)).sqrt();
                                let pixel_size_x = 15.0 / (rect.width() * self.view.scale);
@@ -1805,4 +1942,72 @@ fn lfo_controls(
     }
 
     changed
+}
+
+// Helper for Launchpad Color Picker
+fn launchpad_color_picker_ui(ui: &mut egui::Ui, current_color: &mut u8) -> bool {
+    let mut changed = false;
+    
+    ui.horizontal(|ui| {
+        // Preview
+        let _ = ui.add(egui::Button::new("   ").fill(launchpad_color_to_egui(*current_color)));
+        
+        ui.menu_button(format!("Color: {}", current_color), |ui| {
+            ui.set_width(320.0);
+            
+            let colors = [
+                (5, "Red"), (9, "Amber"), (13, "Yellow"), (21, "Green"), (29, "Mint"), (37, "Azure"), (45, "Blue"), (49, "Purple"),
+                (53, "Magenta"), (57, "Pink"), (6, "Dk Red"), (14, "Dk Yellow"), (22, "Dk Green"), (46, "Dk Blue"), (1, "Low White"), (3, "White"),
+            ];
+            
+            egui::Grid::new("launchpad_palette").show(ui, |ui| {
+                for (i, (code, name)) in colors.iter().enumerate() {
+                    let btn = egui::Button::new("   ")
+                        .fill(launchpad_color_to_egui(*code));
+                    
+                    if ui.add(btn).on_hover_text(*name).clicked() {
+                        *current_color = *code;
+                        changed = true;
+                        ui.close_menu();
+                    }
+                    
+                    if (i + 1) % 8 == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+            
+            // Manual override
+            ui.separator();
+            if ui.add(egui::DragValue::new(current_color).prefix("Code: ")).changed() {
+                changed = true;
+            }
+        });
+    });
+
+    changed
+}
+
+fn launchpad_color_to_egui(code: u8) -> egui::Color32 {
+    // Approximate colors
+    match code {
+        0 => egui::Color32::BLACK,
+        1..=3 => egui::Color32::GRAY,
+        5 => egui::Color32::RED,
+        9 => egui::Color32::from_rgb(255, 100, 0), // Amber
+        13 => egui::Color32::YELLOW,
+        21 => egui::Color32::GREEN,
+        29 => egui::Color32::from_rgb(0, 255, 128), // Mint
+        37 => egui::Color32::from_rgb(0, 200, 255), // Azure
+        45 => egui::Color32::BLUE,
+        49 => egui::Color32::from_rgb(128, 0, 255), // Purple
+        53 => egui::Color32::from_rgb(255, 0, 255), // Magenta
+        57 => egui::Color32::from_rgb(255, 100, 150), // Pink
+        6 => egui::Color32::from_rgb(150, 0, 0),
+        14 => egui::Color32::from_rgb(150, 150, 0),
+        22 => egui::Color32::from_rgb(0, 150, 0),
+        46 => egui::Color32::from_rgb(0, 0, 150),
+        72 => egui::Color32::RED, // Bright Red
+        _ => egui::Color32::LIGHT_GRAY,
+    }
 }

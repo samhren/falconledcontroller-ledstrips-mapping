@@ -21,6 +21,12 @@ pub struct Scene {
     #[serde(default)]
     pub masks: Vec<Mask>,              // used when kind=="Masks"
     pub global: Option<GlobalEffect>,  // used when kind=="Global"
+    #[serde(default)]
+    pub launchpad_btn: Option<u8>,
+    #[serde(default)]
+    pub launchpad_is_cc: bool,
+    #[serde(default)]
+    pub launchpad_color: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -120,4 +126,6 @@ pub struct AppState {
     pub effect: String,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub layout_locked: bool,
 }

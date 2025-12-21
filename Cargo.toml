@@ -20,3 +20,4 @@ log = "0.4"
 home = "=0.5.9" # Pin to avoid edition2024
 pollster = "0.2" # For async blocking if needed
 rand = "0.8"
+midir = "0.10.3"
