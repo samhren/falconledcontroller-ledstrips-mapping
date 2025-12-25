@@ -7,6 +7,12 @@ pub struct GlobalEffect {
     pub params: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GlobalEffectConfig {
+    pub effect: GlobalEffect,
+    pub targets: Option<Vec<u64>>, // List of Strip IDs. None or Empty implies "All"
+}
+
 impl Default for GlobalEffect {
     fn default() -> Self {
         Self { kind: "Rainbow".into(), params: HashMap::new() }
@@ -20,7 +26,9 @@ pub struct Scene {
     pub kind: String,                  // "Masks" | "Global"
     #[serde(default)]
     pub masks: Vec<Mask>,              // used when kind=="Masks"
-    pub global: Option<GlobalEffect>,  // used when kind=="Global"
+    pub global: Option<GlobalEffect>,  // DEPRECATED: used only for migration
+    #[serde(default)]
+    pub global_effects: Vec<GlobalEffectConfig>, // used when kind=="Global"
     #[serde(default)]
     pub launchpad_btn: Option<u8>,
     #[serde(default)]

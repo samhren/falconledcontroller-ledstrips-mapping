@@ -360,8 +360,8 @@ impl LightingEngine {
                         }
                     }
                     "Global" => {
-                        if let Some(effect) = scene.global {
-                            self.apply_global_effect(&effect, &mut state.strips, t, beat);
+                        for config in &scene.global_effects {
+                             self.apply_global_effect(&config.effect, &mut state.strips, t, beat, config.targets.as_ref());
                         }
                     }
                     _ => {
@@ -590,8 +590,17 @@ impl LightingEngine {
                 (t * speed * self.speed) as f64
             };
 
+            let unidirectional = mask.params.get("unidirectional").and_then(|v| v.as_bool()).unwrap_or(false);
             let motion = mask.params.get("motion").and_then(|v| v.as_str()).unwrap_or("Smooth");
-            let osc_val = if motion == "Linear" {
+            
+            let osc_val = if unidirectional {
+                 // Sawtooth wave: -1.0 to 1.0
+                 let norm_phase = (phase / (std::f64::consts::PI * 2.0)).fract();
+                 // fract() returns [0, 1) (if positive). phase is usually positive (t*speed or beat).
+                 // We want strictly 0..1 then map to -1..1
+                 let p = if norm_phase < 0.0 { norm_phase + 1.0 } else { norm_phase };
+                 p * 2.0 - 1.0
+            } else if motion == "Linear" {
                 (2.0 / std::f64::consts::PI) * (phase.sin().asin())
             } else {
                 phase.sin()
@@ -849,7 +858,7 @@ impl LightingEngine {
 }
 
 impl LightingEngine {
-    fn apply_global_effect(&mut self, effect: &GlobalEffect, strips: &mut [PixelStrip], t: f32, beat: f64) {
+    fn apply_global_effect(&mut self, effect: &GlobalEffect, strips: &mut [PixelStrip], t: f32, beat: f64, targets: Option<&Vec<u64>>) {
         match effect.kind.as_str() {
             "Solid" => {
                 // Use EXACT same color reading as masks
@@ -860,6 +869,8 @@ impl LightingEngine {
 
                 // Apply color EXACTLY like scanner masks do - with intensity and saturating_add
                 for s in strips.iter_mut() {
+                    if let Some(t) = targets { if !t.contains(&s.id) { continue; } }
+                    
                     let cnt = s.pixel_count.min(s.data.len());
                     for i in 0..cnt {
                         let intensity = 1.0; // Full intensity for solid colors
@@ -882,6 +893,8 @@ impl LightingEngine {
                 let hue = (t * speed * self.speed).fract();
                 let c = hsv_to_rgb(hue, 1.0, 1.0);
                 for s in strips.iter_mut() {
+                    if let Some(t) = targets { if !t.contains(&s.id) { continue; } }
+                    
                     let cnt = s.pixel_count.min(s.data.len());
                     for i in 0..cnt { s.data[i] = c; }
                 }
@@ -913,6 +926,8 @@ impl LightingEngine {
                 // Always apply the color with intensity - don't black out
                 // This prevents the "crash to black" issue
                 for s in strips.iter_mut() {
+                    if let Some(t) = targets { if !t.contains(&s.id) { continue; } }
+                    
                     let cnt = s.pixel_count.min(s.data.len());
                     for i in 0..cnt {
                         let r = (color[0] as f32 * intensity) as u8;
@@ -936,6 +951,8 @@ impl LightingEngine {
                 // Spawn new sparkles
                 if self.sparkle_states.len() < MAX_SPARKLES {
                     for strip in strips.iter() {
+                        if let Some(t) = targets { if !t.contains(&strip.id) { continue; } }
+                        
                         let pixel_count = strip.pixel_count.min(strip.data.len());
                         for i in 0..pixel_count {
                             if self.sparkle_states.len() >= MAX_SPARKLES {
@@ -955,6 +972,9 @@ impl LightingEngine {
 
                 // Render and cleanup sparkles
                 self.sparkle_states.retain(|sparkle| {
+                    // Filter: Only process sparkles belonging to targeted strips of THIS effect
+                    if let Some(t) = targets { if !t.contains(&sparkle.strip_id) { return true; } }
+                    
                     let age = t - sparkle.birth_time;
                     if age > life {
                         return false;

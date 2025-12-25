@@ -105,6 +105,8 @@ struct MyApp {
     // MIDI
     midi_sender: Sender<midi::MidiCommand>,
     midi_receiver: Receiver<midi::MidiEvent>,
+    // Scene Reordering
+    dragged_scene_id: Option<u64>,
 }
 
 impl Default for MyApp {
@@ -144,6 +146,18 @@ impl Default for MyApp {
         match db.load_state() {
             Ok(loaded) => {
                 state = loaded;
+                // MIGRATION: Move deprecated `global` into `global_effects` if needed
+                for scene in &mut state.scenes {
+                    if scene.kind == "Global" && scene.global_effects.is_empty() && scene.global.is_some() {
+                         if let Some(old_global) = scene.global.take() {
+                             scene.global_effects.push(model::GlobalEffectConfig {
+                                 effect: old_global,
+                                 targets: None, // Apply to all
+                             });
+                             println!("Migrated scene '{}' global effect", scene.name);
+                         }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Failed to load state from database: {}", e);
@@ -198,6 +212,7 @@ impl Default for MyApp {
             import_file_path: None,
             midi_sender: tx_cmd,
             midi_receiver: rx_event,
+            dragged_scene_id: None,
         }
     }
 }
@@ -661,11 +676,34 @@ impl eframe::App for MyApp {
                                     if ui.button("Create").clicked() {
                                         let id = rand::random();
                                         let scene = if self.new_scene_kind == "Masks" {
-                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Masks".into(), masks: vec![], global: None, launchpad_btn: None, launchpad_color: None, launchpad_is_cc: false }
+                                            model::Scene {
+                                                id,
+                                                name: self.new_scene_name.clone(),
+                                                kind: "Masks".into(),
+                                                masks: vec![],
+                                                global: None,
+                                                global_effects: vec![],
+                                                launchpad_btn: None,
+                                                launchpad_color: None,
+                                                launchpad_is_cc: false
+                                            }
                                         } else {
                                             let mut ge = model::GlobalEffect::default();
                                             ge.params.insert("speed".into(), 0.2.into());
-                                            model::Scene { id, name: self.new_scene_name.clone(), kind: "Global".into(), masks: vec![], global: Some(ge), launchpad_btn: None, launchpad_color: None, launchpad_is_cc: false }
+                                            model::Scene {
+                                                 id,
+                                                 name: self.new_scene_name.clone(),
+                                                 kind: "Global".into(),
+                                                 masks: vec![],
+                                                 global: None,
+                                                 global_effects: vec![model::GlobalEffectConfig {
+                                                     effect: ge,
+                                                     targets: None, 
+                                                 }],
+                                                 launchpad_btn: None,
+                                                 launchpad_color: None,
+                                                 launchpad_is_cc: false
+                                            }
                                         };
                                         self.state.scenes.push(scene);
                                         self.state.selected_scene_id = Some(id);
@@ -678,9 +716,17 @@ impl eframe::App for MyApp {
 
                         // Scenes list with per-scene editors
                         let mut delete_scene_idx: Option<usize> = None;
+                        let mut duplicate_scene_idx: Option<usize> = None;
+                        let mut swap_request: Option<(usize, usize)> = None;
+                        let mut floating_scene: Option<model::Scene> = None;
                         let mut needs_save = false;
                         let sender = self.midi_sender.clone();
                         
+                        // Pre-calculate dragged index to avoid borrow issues
+                        let dragged_scene_index = self.dragged_scene_id.and_then(|id| {
+                            self.state.scenes.iter().position(|s| s.id == id)
+                        });
+
                         // Collect used IDs to prevent duplicates
                         let mut used_ids = std::collections::HashMap::new();
                         for s in &self.state.scenes {
@@ -691,18 +737,59 @@ impl eframe::App for MyApp {
                             }
                         }
 
+                        // Collect strip info needed for UI (id, index)
+                        let available_strips: Vec<(u64, usize)> = self.state.strips.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+
                         for (si, scene) in self.state.scenes.iter_mut().enumerate() {
                             ui.push_id(scene.id, |ui| {
                                 ui.separator();
-                                let selected = self.state.selected_scene_id == Some(scene.id);
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(selected, &scene.name).clicked() {
-                                        self.state.selected_scene_id = Some(scene.id);
-                                    }
-                                    ui.text_edit_singleline(&mut scene.name);
-                                    if ui.button("X").clicked() { delete_scene_idx = Some(si); }
-                                });
                                 
+                                    // Floating Drag Logic
+                                let is_being_dragged = self.dragged_scene_id == Some(scene.id);
+                                let row_rect = if is_being_dragged {
+                                    floating_scene = Some(scene.clone());
+                                    // Placeholder
+                                    let resp = ui.horizontal(|ui| {
+                                        ui.add(egui::Label::new("       ").sense(egui::Sense::hover())); // Spacing
+                                        ui.label(egui::RichText::new(&scene.name).italics().color(egui::Color32::DARK_GRAY));
+                                    }).response;
+                                    Some(resp.rect)
+                                } else {
+                                    let selected = self.state.selected_scene_id == Some(scene.id);
+                                    let inner_resp = ui.horizontal(|ui| {
+                                        // Drag Handle
+                                        let resp = ui.add(egui::Button::new("::").frame(false).sense(egui::Sense::drag()));
+                                        if resp.drag_started() {
+                                            self.dragged_scene_id = Some(scene.id);
+                                        }
+                                        
+                                        // Make sure we update the floating scene if we just started dragging
+                                        if self.dragged_scene_id == Some(scene.id) {
+                                             // Next frame it will be caught by is_being_dragged above
+                                        }
+
+                                        if ui.selectable_label(selected, &scene.name).clicked() {
+                                            self.state.selected_scene_id = Some(scene.id);
+                                        }
+                                        ui.text_edit_singleline(&mut scene.name);
+                                        if ui.button("📋").on_hover_text("Duplicate").clicked() { duplicate_scene_idx = Some(si); }
+                                        if ui.button("X").clicked() { delete_scene_idx = Some(si); }
+                                    });
+                                    Some(inner_resp.response.rect)
+                                };
+
+                                // Check for drag-over (Live Reorder) on the entire row
+                                if let Some(r) = row_rect {
+                                    if let Some(from_idx) = dragged_scene_index {
+                                        if from_idx != si && r.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default())) {
+                                            swap_request = Some((from_idx, si));
+                                        }
+                                    }
+                                }
+                                
+                                if !is_being_dragged {
+                                    let selected = self.state.selected_scene_id == Some(scene.id);
+                                    if selected {
                                 // Launchpad Config
                                 ui.horizontal(|ui| {
                                     ui.label("Launchpad:");
@@ -777,88 +864,159 @@ impl eframe::App for MyApp {
                                     }
                                 });
                                 if scene.kind == "Global" {
-                                    if scene.global.is_none() { scene.global = Some(model::GlobalEffect::default()); }
-                                    if let Some(ge) = scene.global.as_mut() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Effect:");
-                                            egui::ComboBox::from_id_source(format!("ge_kind_{}", scene.id))
-                                                .selected_text(ge.kind.clone())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(&mut ge.kind, "Rainbow".into(), "Rainbow");
-                                                    ui.selectable_value(&mut ge.kind, "Solid".into(), "Solid");
-                                                    ui.selectable_value(&mut ge.kind, "Flash".into(), "Flash");
-                                                    ui.selectable_value(&mut ge.kind, "Sparkle".into(), "Sparkle");
-                                                });
-                                        });
-                                        if ge.kind == "Solid" {
-                                            let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
-                                            if color_picker(ui, &mut color) {
-                                                ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
-                                            }
-                                        } else if ge.kind == "Flash" {
-                                            // Flash UI
-                                            // Color
-                                            ui.horizontal(|ui| {
-                                                ui.label("Color:");
-                                                 let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
-                                                if color_picker(ui, &mut color) {
-                                                    ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
-                                                }
-                                            });
-                                            // Rate
-                                            ui.horizontal(|ui| {
-                                                ui.label("Rate:");
-                                                let mut rate = ge.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar").to_string();
-                                                egui::ComboBox::from_id_source(format!("flash_rate_{}", scene.id))
-                                                    .selected_text(rate.clone())
-                                                    .show_ui(ui, |ui| {
-                                                        ui.selectable_value(&mut rate, "4 Bar".into(), "4 Bar");
-                                                        ui.selectable_value(&mut rate, "1 Bar".into(), "1 Bar");
-                                                        ui.selectable_value(&mut rate, "1/2".into(), "1/2");
-                                                        ui.selectable_value(&mut rate, "1/4".into(), "1/4");
-                                                        ui.selectable_value(&mut rate, "1/8".into(), "1/8");
-                                                    });
-                                                if rate != ge.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar") {
-                                                    ge.params.insert("rate".into(), serde_json::json!(rate));
-                                                }
-                                            });
-                                            // Decay
-                                            let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
-                                            if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay (Sharpness)")).changed() {
-                                                ge.params.insert("decay".into(), decay.into());
-                                            }
-                                        } else if ge.kind == "Sparkle" {
-                                            // Sparkle UI
-                                            // Color
-                                            ui.horizontal(|ui| {
-                                                ui.label("Color:");
-                                                let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
-                                                if color_picker(ui, &mut color) {
-                                                    ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
-                                                }
-                                            });
-
-                                            let mut density = ge.params.get("density").and_then(|v| v.as_f64()).unwrap_or(0.05);
-                                            if ui.add(egui::Slider::new(&mut density, 0.001..=0.2).text("Density")).changed() {
-                                                ge.params.insert("density".into(), density.into());
-                                            }
-
-                                            let mut life = ge.params.get("life").and_then(|v| v.as_f64()).unwrap_or(0.2);
-                                            if ui.add(egui::Slider::new(&mut life, 0.05..=2.0).text("Life (seconds)")).changed() {
-                                                ge.params.insert("life".into(), life.into());
-                                            }
-
-                                            let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
-                                            if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay")).changed() {
-                                                ge.params.insert("decay".into(), decay.into());
-                                            }
-                                        } else {
-                                            let mut speed = ge.params.get("speed").and_then(|v| v.as_f64()).unwrap_or(0.2);
-                                            if ui.add(egui::Slider::new(&mut speed, 0.05..=2.0).text("Speed")).changed() {
-                                                ge.params.insert("speed".into(), speed.into());
-                                            }
-                                            lfo_controls(ui, &mut ge.params, "speed", format!("speed_lfo_{}", scene.id));
+                                    ui.horizontal(|ui| {
+                                        ui.label("Global Effects:");
+                                        if ui.button("➕ Add Effect").clicked() {
+                                             scene.global_effects.push(model::GlobalEffectConfig {
+                                                 effect: model::GlobalEffect::default(),
+                                                 targets: None
+                                             });
                                         }
+                                    });
+
+                                    let mut delete_effect_idx = None;
+                                    for (eff_idx, config) in scene.global_effects.iter_mut().enumerate() {
+                                        ui.push_id(format!("ge_{}_{}", scene.id, eff_idx), |ui| {
+                                            ui.group(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(format!("#{}", eff_idx + 1));
+                                                    
+                                                    // TARGET SELECTOR
+                                                    // TARGET SELECTOR
+                                                    let label_text = match &config.targets {
+                                                        None => "Targets: All Strips".to_string(),
+                                                        Some(t) => {
+                                                            if t.is_empty() { "Targets: None".to_string() }
+                                                            else { format!("Targets: {} Strips", t.len()) }
+                                                        }
+                                                    };
+
+                                                    egui::CollapsingHeader::new(label_text)
+                                                        .id_source(format!("target_sel_{}_{}", scene.id, eff_idx))
+                                                        .show(ui, |ui| {
+                                                            if ui.selectable_label(config.targets.is_none(), "All Strips").clicked() {
+                                                                config.targets = None;
+                                                            }
+                                                            ui.separator();
+                                                            
+                                                            for (sid, sidx) in &available_strips {
+                                                                let mut is_selected = if let Some(t) = &config.targets {
+                                                                    t.contains(sid)
+                                                                } else {
+                                                                    true 
+                                                                };
+                                                                
+                                                                if ui.checkbox(&mut is_selected, format!("Strip #{}", sidx + 1)).clicked() {
+                                                                    if config.targets.is_none() {
+                                                                        // Was All.
+                                                                        if !is_selected {
+                                                                            // Unchecked one item. Switch to All-minus-one
+                                                                            let mut new_t: Vec<u64> = available_strips.iter().map(|(id, _)| *id).collect();
+                                                                            new_t.retain(|x| x != sid);
+                                                                            config.targets = Some(new_t);
+                                                                        }
+                                                                    } else {
+                                                                        // Was Selective
+                                                                        let t = config.targets.as_mut().unwrap();
+                                                                        if is_selected {
+                                                                            if !t.contains(sid) { t.push(*sid); }
+                                                                        } else {
+                                                                            t.retain(|x| x != sid);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                        
+                                                    // Type Selector
+                                                    egui::ComboBox::from_id_source("kind_sel")
+                                                        .selected_text(&config.effect.kind)
+                                                        .show_ui(ui, |ui| {
+                                                            ui.selectable_value(&mut config.effect.kind, "Rainbow".into(), "Rainbow");
+                                                            ui.selectable_value(&mut config.effect.kind, "Solid".into(), "Solid");
+                                                            ui.selectable_value(&mut config.effect.kind, "Flash".into(), "Flash");
+                                                            ui.selectable_value(&mut config.effect.kind, "Sparkle".into(), "Sparkle");
+                                                        });
+                                                        
+                                                    if ui.button("🗑").clicked() {
+                                                        delete_effect_idx = Some(eff_idx);
+                                                    }
+                                                });
+                                                
+                                                // Target checkboxes (Custom UI instead of simple combobox for multi-select)
+                                                // We need strip info. Since we can't access `self.state.strips` here easily,
+                                                // we should have pre-calculated a list of (id, name/info).
+                                                // See below for fix.
+                                                
+                                                // Render Effect Params
+                                                let ge = &mut config.effect;
+                                                // ... (Reusing existing UI logic, but refactored to check `ge`)
+                                                // INLINED FOR NOW:
+                                                if ge.kind == "Solid" {
+                                                    let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
+                                                    if color_picker(ui, &mut color, format!("ge_sol_{}_{}", scene.id, eff_idx)) {
+                                                        ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
+                                                    }
+                                                } else if ge.kind == "Flash" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color:");
+                                                         let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
+                                                        if color_picker(ui, &mut color, format!("ge_fl_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
+                                                        }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Rate:");
+                                                        let mut rate = ge.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar").to_string();
+                                                        egui::ComboBox::from_id_source("rate")
+                                                            .selected_text(rate.clone())
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut rate, "4 Bar".into(), "4 Bar");
+                                                                ui.selectable_value(&mut rate, "1 Bar".into(), "1 Bar");
+                                                                ui.selectable_value(&mut rate, "1/2".into(), "1/2");
+                                                                ui.selectable_value(&mut rate, "1/4".into(), "1/4");
+                                                                ui.selectable_value(&mut rate, "1/8".into(), "1/8");
+                                                            });
+                                                        if rate != ge.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar") {
+                                                            ge.params.insert("rate".into(), serde_json::json!(rate));
+                                                        }
+                                                    });
+                                                    let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
+                                                    if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay")).changed() {
+                                                        ge.params.insert("decay".into(), decay.into());
+                                                    }
+                                                } else if ge.kind == "Sparkle" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color:");
+                                                        let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
+                                                        if color_picker(ui, &mut color, format!("ge_spk_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
+                                                        }
+                                                    });
+                                                    let mut density = ge.params.get("density").and_then(|v| v.as_f64()).unwrap_or(0.05);
+                                                    if ui.add(egui::Slider::new(&mut density, 0.001..=0.2).text("Density")).changed() {
+                                                        ge.params.insert("density".into(), density.into());
+                                                    }
+                                                    let mut life = ge.params.get("life").and_then(|v| v.as_f64()).unwrap_or(0.2);
+                                                    if ui.add(egui::Slider::new(&mut life, 0.05..=2.0).text("Life")).changed() {
+                                                        ge.params.insert("life".into(), life.into());
+                                                    }
+                                                    let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
+                                                    if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay")).changed() {
+                                                        ge.params.insert("decay".into(), decay.into());
+                                                    }
+                                                } else { // Rainbow / Default
+                                                    let mut speed = ge.params.get("speed").and_then(|v| v.as_f64()).unwrap_or(0.2);
+                                                    if ui.add(egui::Slider::new(&mut speed, 0.05..=2.0).text("Speed")).changed() {
+                                                        ge.params.insert("speed".into(), speed.into());
+                                                    }
+                                                    lfo_controls(ui, &mut ge.params, "speed", format!("spd_lfo"));
+                                                }
+                                            });
+                                        });
+                                    }
+                                    if let Some(idx) = delete_effect_idx {
+                                        scene.global_effects.remove(idx);
                                     }
                                 } else {
                                     // Embedded Masks editor for this scene
@@ -988,11 +1146,9 @@ impl eframe::App for MyApp {
                                         let mut rgb = m.params.get("color").and_then(|v| {
                                             serde_json::from_value::<Vec<u8>>(serde_json::json!(v)).ok()
                                         }).unwrap_or(vec![255, 0, 0]);
-                                        if rgb.len() < 3 { rgb = vec![255, 0, 0]; }
-                                        let mut color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                                        
-                                        if ui.color_edit_button_srgba(&mut color).changed() {
-                                            m.params.insert("color".into(), serde_json::json!([color.r(), color.g(), color.b()]));
+                                        let mut rgb_arr = [rgb[0], rgb[1], rgb[2]];
+                                        if color_picker(ui, &mut rgb_arr, format!("msk_main_{}", m.id)) {
+                                            m.params.insert("color".into(), serde_json::json!(rgb_arr));
                                             needs_save = true;
                                         }
                                     });
@@ -1034,9 +1190,8 @@ impl eframe::App for MyApp {
                                         let mut changed = false;
                                         ui.horizontal_wrapped(|ui| {
                                             for (_i, rgb) in colors.iter_mut().enumerate() {
-                                                let mut c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                                                if ui.color_edit_button_srgba(&mut c).changed() {
-                                                    *rgb = [c.r(), c.g(), c.b()];
+                                                // use array directly
+                                                if color_picker(ui, rgb, format!("msk_grad_{}_{}", m.id, _i)) {
                                                     changed = true;
                                                 }
                                                 // Remove button (small x)
@@ -1062,11 +1217,8 @@ impl eframe::App for MyApp {
                                         let mut remove_idx = None;
                                         ui.horizontal(|ui| {
                                            for i in 0..colors.len() {
-                                               let rgb = colors[i];
                                                ui.push_id(format!("gcol_{}_{}", m.id, i), |ui| {
-                                                    let mut c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                                                    if ui.color_edit_button_srgba(&mut c).changed() {
-                                                        colors[i] = [c.r(), c.g(), c.b()];
+                                                    if color_picker(ui, &mut colors[i], "picker") {
                                                         changed = true;
                                                     }
                                                     if colors.len() > 1 && ui.small_button("-").clicked() {
@@ -1099,6 +1251,11 @@ impl eframe::App for MyApp {
                                                 ui.horizontal(|ui| {
                                                     if ui.checkbox(&mut is_sync, "Syn").changed() {
                                                         m.params.insert("sync".into(), is_sync.into());
+                                                        needs_save = true;
+                                                    }
+                                                    let mut uni = m.params.get("unidirectional").and_then(|v| v.as_bool()).unwrap_or(false);
+                                                    if ui.checkbox(&mut uni, "Uni").changed() {
+                                                        m.params.insert("unidirectional".into(), uni.into());
                                                         needs_save = true;
                                                     }
                                                     
@@ -1179,8 +1336,24 @@ impl eframe::App for MyApp {
                             if let Some(idx) = delete_mask_idx { scene.masks.remove(idx); }
                             if needs_save { /* autosave will handle */ }
                         }
+                        } // End of !is_being_dragged
+                        } // End of push_id
                             });
                         }
+                        if let Some(i) = duplicate_scene_idx {
+                            let mut new_s = self.state.scenes[i].clone();
+                            new_s.id = rand::random();
+                            new_s.name = format!("{} Copy", new_s.name);
+                            new_s.launchpad_btn = None;
+                            self.state.scenes.push(new_s);
+                            self.mark_state_changed();
+                        }
+                        
+                        if let Some((from, to)) = swap_request {
+                            self.state.scenes.swap(from, to);
+                            self.mark_state_changed();
+                        }
+
                         if let Some(i) = delete_scene_idx {
                             self.state.scenes.remove(i);
                             self.mark_state_changed();
@@ -1189,6 +1362,26 @@ impl eframe::App for MyApp {
                         if needs_save {
                             self.mark_state_changed();
                         }
+                        
+                        // Render Floating Scene
+                        if let Some(scene) = floating_scene {
+                             if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+                                 egui::Area::new("dragged_scene")
+                                     .fixed_pos(pointer_pos + egui::vec2(10.0, 10.0)) // Offset slightly
+                                     .order(egui::Order::Tooltip)
+                                     .show(ui.ctx(), |ui| {
+                                         egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                             ui.label(egui::RichText::new(format!(":: {}", scene.name)).strong());
+                                         });
+                                     });
+                             }
+                        }
+                        
+                        // Clear drag state if mouse released
+                        if ui.input(|i| i.pointer.any_released()) {
+                            self.dragged_scene_id = None;
+                        }
+
                     });
                 });
 
@@ -1926,8 +2119,15 @@ impl eframe::App for MyApp {
                              };
                              
                              // Motion Easing
+                             // Motion Easing
                              let motion = m.params.get("motion").and_then(|v| v.as_str()).unwrap_or("Smooth");
-                             let osc_val = if motion == "Linear" {
+                             let unidirectional = m.params.get("unidirectional").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                             let osc_val = if unidirectional {
+                                  let norm_phase = (phase / (std::f64::consts::PI * 2.0)).fract();
+                                  let p = if norm_phase < 0.0 { norm_phase + 1.0 } else { norm_phase };
+                                  p * 2.0 - 1.0
+                             } else if motion == "Linear" {
                                  (2.0 / std::f64::consts::PI) * (phase.sin().asin())
                              } else {
                                  phase.sin()
@@ -2051,14 +2251,46 @@ impl eframe::App for MyApp {
         ctx.request_repaint(); 
     }
 }
-// Simple RGB color picker helper
-fn color_picker(ui: &mut egui::Ui, rgb: &mut [u8; 3]) -> bool {
+// Simple RGB color picker helper with Hex Input
+fn color_picker(ui: &mut egui::Ui, rgb: &mut [u8; 3], id_source: impl std::hash::Hash) -> bool {
+    let mut changed = false;
     let mut arr = [rgb[0], rgb[1], rgb[2]];
-    let resp = ui.color_edit_button_srgb(&mut arr);
-    if resp.changed() {
-        *rgb = arr;
-        true
-    } else { false }
+
+    // Get persistent state ID
+    let id = ui.make_persistent_id(id_source);
+    
+    // Get temp hex string from memory or init
+    let mut hex_str = ui.data_mut(|d| {
+        d.get_temp::<String>(id).unwrap_or_else(|| format!("#{:02X}{:02X}{:02X}", arr[0], arr[1], arr[2]))
+    });
+
+    ui.horizontal(|ui| {
+        let resp = ui.color_edit_button_srgb(&mut arr);
+        if resp.changed() {
+            *rgb = arr;
+            hex_str = format!("#{:02X}{:02X}{:02X}", arr[0], arr[1], arr[2]);
+            changed = true;
+        }
+
+        if ui.add(egui::TextEdit::singleline(&mut hex_str).desired_width(60.0)).changed() {
+             // Parse hex
+             let clean_hex = hex_str.trim().trim_start_matches('#');
+             if clean_hex.len() == 6 {
+                 if let Ok(val) = u32::from_str_radix(clean_hex, 16) {
+                     let r = ((val >> 16) & 0xFF) as u8;
+                     let g = ((val >> 8) & 0xFF) as u8;
+                     let b = (val & 0xFF) as u8;
+                     arr = [r, g, b];
+                     *rgb = arr;
+                     changed = true;
+                 }
+             }
+        }
+    });
+
+    // Write back to memory
+    ui.data_mut(|d| d.insert_temp(id, hex_str));
+    changed
 }
 
 /// Renders LFO controls for a given parameter

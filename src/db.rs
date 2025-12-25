@@ -55,6 +55,7 @@ impl Database {
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 global_effect_json TEXT,
+                global_effects_json TEXT,
                 launchpad_btn INTEGER,
                 launchpad_is_cc INTEGER NOT NULL DEFAULT 0,
                 launchpad_color INTEGER
@@ -100,6 +101,11 @@ impl Database {
             INSERT OR IGNORE INTO app_config (id) VALUES (1);
             "#
         )?;
+        
+        // Ensure new column exists for existing databases
+        // Ignore error if column already exists
+        let _ = self.conn.execute("ALTER TABLE scenes ADD COLUMN global_effects_json TEXT", []);
+
         Ok(())
     }
 
@@ -278,7 +284,7 @@ impl Database {
 
         // Load scenes
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind, global_effect_json, launchpad_btn, launchpad_is_cc, launchpad_color FROM scenes ORDER BY id"
+            "SELECT id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color FROM scenes ORDER BY id"
         )?;
         let scene_rows: Vec<_> = stmt.query_map([], |row| {
             Ok((
@@ -286,14 +292,15 @@ impl Database {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?.collect::<Result<Vec<_>, _>>()?;
 
         let mut scenes = Vec::new();
-        for (id, name, kind, global_json, launchpad_btn, launchpad_is_cc, launchpad_color) in scene_rows {
+        for (id, name, kind, global_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color) in scene_rows {
             // Load scene masks
             let mut stmt = self.conn.prepare(
                 "SELECT mask_id, mask_type, x, y, params_json FROM scene_masks WHERE scene_id = ?1 ORDER BY display_order"
@@ -317,12 +324,19 @@ impl Database {
                 .transpose()
                 .context("Failed to parse global effect JSON")?;
 
+            let global_effects = if let Some(json) = global_effects_json {
+                serde_json::from_str(&json).unwrap_or_default()
+            } else {
+                Vec::new() // Default for old DBs
+            };
+
             scenes.push(Scene {
                 id,
                 name,
                 kind,
                 masks: scene_masks,
                 global,
+                global_effects,
                 launchpad_btn: launchpad_btn.map(|v| v as u8),
                 launchpad_is_cc: launchpad_is_cc != 0,
                 launchpad_color: launchpad_color.map(|v| v as u8),
@@ -575,15 +589,17 @@ impl Database {
             let global_effect_json = scene.global.as_ref()
                 .map(|g| serde_json::to_string(g))
                 .transpose()?;
+            let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
                     global_effect_json,
+                    global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
                     if scene.launchpad_is_cc { 1 } else { 0 },
                     scene.launchpad_color.map(|v| v as i64),
