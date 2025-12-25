@@ -14,7 +14,7 @@ Lightspeed Controller is designed for managing complex LED strip setups. It allo
     - **Masks**: Compositional scenes using geometric masks to reveal or hide underlying patterns.
     - **Global**: Apply effects to strips directly without masking.
 
-### 🎭 dynamic Visualizers
+### 🎭 Dynamic Visualizers
 - **Scanner Mask**: A scanning bar effect with configurable width, speed, and motion easing (Sine, Triangle, **Sawtooth/Unidirectional**).
 - **Radial Mask**: Expanding/contracting circular pulse effects.
 - **Linear Mask**: Standard linear gradients and wipe effects.
@@ -61,3 +61,6 @@ cargo run --release
 
 ## License
 [License Information Here]
+
+## Credits
+Vibe coded with Anti-Gravity and Claude Code.
