@@ -114,4 +114,4 @@ cargo run
 MIT License - see LICENSE file for details
 
 ## Acknowledgments
-Built with Rust, egui, and the power of creative coding.
+Built with Google Antigravity and Claude Code.
