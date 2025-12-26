@@ -58,8 +58,8 @@ Lightspeed Controller is a professional-grade lighting control application desig
 ### Build & Run
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/Lights.git
-cd Lights
+git clone https://github.com/samhren/lightspeed-controller-sacn.git
+cd lightspeed-controller-sacn
 
 # Run in release mode for optimal performance
 cargo run --release
@@ -114,4 +114,4 @@ cargo run
 MIT License - see LICENSE file for details
 
 ## Acknowledgments
-Built with Rust, egui, and the power of creative coding.
+Built with Google Antigravity and Claude Code.
