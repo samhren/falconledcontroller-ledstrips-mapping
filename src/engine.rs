@@ -12,6 +12,19 @@ struct SparklePixel {
     color: [u8; 3],
 }
 
+struct PulseState {
+    strip_id: u64,
+    position: f32,      // Current head position in pixels
+    last_update: f32,   // Time of last update
+}
+
+struct GlitchPixel {
+    strip_id: u64,
+    pixel_index: usize,
+    birth_time: f32,
+    color: [u8; 3],
+}
+
 pub struct LightingEngine {
     sender: SacnSource,
     link: AblLink,
@@ -44,6 +57,10 @@ pub struct LightingEngine {
 
     // Sparkle effect state tracking
     sparkle_states: Vec<SparklePixel>,
+    // Pulse Wave effect state tracking
+    pulse_states: Vec<PulseState>,
+    // Glitch Sparkle effect state tracking
+    glitch_states: Vec<GlitchPixel>,
     // Burst effect radius smoothing per-mask
     burst_radius_states: std::collections::HashMap<u64, f32>,
 }
@@ -92,6 +109,8 @@ impl LightingEngine {
             phase_error: 0.0,
             phase_correction_rate: 0.5, // Correct half a beat per second when out of sync
             sparkle_states: Vec::new(),
+            pulse_states: Vec::new(),
+            glitch_states: Vec::new(),
             burst_radius_states: std::collections::HashMap::new(),
         }
     }
@@ -999,6 +1018,354 @@ impl LightingEngine {
 
                     true
                 });
+            }
+            "ColorWash" => {
+                // Parse parameters
+                let color_a = effect.params.get("color_a").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 0, 0]);
+
+                let color_b = effect.params.get("color_b").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([0, 0, 255]);
+
+                let sync_to_beat = effect.params.get("sync_to_beat").and_then(|v| v.as_bool()).unwrap_or(false);
+                let rate_str = effect.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1 Bar");
+                let period = effect.params.get("period").and_then(|v| v.as_f64()).unwrap_or(4.0);
+
+                // Calculate phase (0.0 to 1.0)
+                let phase = if sync_to_beat {
+                    let divisor = match rate_str {
+                        "4 Bar" => 16.0,
+                        "2 Bar" => 8.0,
+                        "1 Bar" => 4.0,
+                        "1/2" => 2.0,
+                        "1/4" => 1.0,
+                        "1/8" => 0.5,
+                        _ => 1.0,
+                    };
+                    (beat / divisor).fract()
+                } else {
+                    (t as f64 / period).fract()
+                };
+
+                // Apply sine wave for smooth oscillation
+                let sine_phase = ((phase * 2.0 * std::f64::consts::PI).sin() + 1.0) / 2.0;
+
+                // Linear interpolation between color_a and color_b
+                let r = (color_a[0] as f64 * (1.0 - sine_phase) + color_b[0] as f64 * sine_phase) as u8;
+                let g = (color_a[1] as f64 * (1.0 - sine_phase) + color_b[1] as f64 * sine_phase) as u8;
+                let b = (color_a[2] as f64 * (1.0 - sine_phase) + color_b[2] as f64 * sine_phase) as u8;
+
+                // Apply to all targeted strips
+                for strip in strips.iter_mut() {
+                    if let Some(t) = targets {
+                        if !t.contains(&strip.id) {
+                            continue;
+                        }
+                    }
+
+                    for pixel in &mut strip.data {
+                        *pixel = [r, g, b];
+                    }
+                }
+            }
+            "GlitchSparkle" => {
+                // Parse parameters
+                let background_color = effect.params.get("background_color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([0, 0, 0]);
+
+                let sparkle_color = effect.params.get("sparkle_color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 255, 255]);
+
+                let sparkle_rate = effect.params.get("sparkle_rate").and_then(|v| v.as_f64()).unwrap_or(0.01) as f32;
+                let fade_time = effect.params.get("fade_time").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+                let decay = effect.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
+
+                const MAX_GLITCH_SPARKLES: usize = 500;
+
+                // Step 1: Fill background color on all targeted strips
+                for strip in strips.iter_mut() {
+                    if let Some(t) = targets {
+                        if !t.contains(&strip.id) {
+                            continue;
+                        }
+                    }
+
+                    for pixel in &mut strip.data {
+                        *pixel = background_color;
+                    }
+                }
+
+                // Step 2: Spawn new sparkles
+                if self.glitch_states.len() < MAX_GLITCH_SPARKLES {
+                    for strip in strips.iter() {
+                        if let Some(t) = targets {
+                            if !t.contains(&strip.id) {
+                                continue;
+                            }
+                        }
+
+                        let pixel_count = strip.pixel_count.min(strip.data.len());
+                        for i in 0..pixel_count {
+                            if self.glitch_states.len() >= MAX_GLITCH_SPARKLES {
+                                break;
+                            }
+                            if rand::random::<f32>() < sparkle_rate {
+                                self.glitch_states.push(GlitchPixel {
+                                    strip_id: strip.id,
+                                    pixel_index: i,
+                                    birth_time: t,
+                                    color: sparkle_color,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Step 3: Render and cleanup sparkles
+                self.glitch_states.retain(|sparkle| {
+                    // Filter by target strips
+                    if let Some(t) = targets {
+                        if !t.contains(&sparkle.strip_id) {
+                            return true; // Keep but don't render
+                        }
+                    }
+
+                    // Check lifetime
+                    let age = t - sparkle.birth_time;
+                    if age > fade_time {
+                        return false; // Remove dead sparkles
+                    }
+
+                    // Render to strip
+                    if let Some(strip) = strips.iter_mut().find(|s| s.id == sparkle.strip_id) {
+                        if sparkle.pixel_index < strip.data.len() {
+                            let progress = age / fade_time;
+                            let intensity = (1.0 - progress).powf(decay as f32).clamp(0.0, 1.0);
+
+                            let r = (sparkle.color[0] as f32 * intensity) as u8;
+                            let g = (sparkle.color[1] as f32 * intensity) as u8;
+                            let b = (sparkle.color[2] as f32 * intensity) as u8;
+
+                            // Additive blending on top of background
+                            strip.data[sparkle.pixel_index] = [
+                                strip.data[sparkle.pixel_index][0].saturating_add(r),
+                                strip.data[sparkle.pixel_index][1].saturating_add(g),
+                                strip.data[sparkle.pixel_index][2].saturating_add(b),
+                            ];
+                        }
+                    }
+
+                    true // Keep sparkle alive
+                });
+            }
+            "PulseWave" => {
+                // Parse parameters
+                let color = effect.params.get("color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 255, 255]);
+
+                let sync = effect.params.get("sync").and_then(|v| v.as_bool()).unwrap_or(true);
+                let rate_str = effect.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1/4");
+                let manual_speed = effect.params.get("speed").and_then(|v| v.as_f64()).unwrap_or(5.0);
+                let tail_length = effect.params.get("tail_length").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+                let decay = effect.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(2.0) as f32;
+                let direction = effect.params.get("direction").and_then(|v| v.as_str()).unwrap_or("Forward");
+
+                // Calculate speed (pixels per second)
+                let speed = if sync {
+                    // Beat-synced: use beat phase to calculate position
+                    let divisor = match rate_str {
+                        "4 Bar" => 16.0,
+                        "2 Bar" => 8.0,
+                        "1 Bar" => 4.0,
+                        "1/2" => 2.0,
+                        "1/4" => 1.0,
+                        "1/8" => 0.5,
+                        _ => 1.0,
+                    };
+                    // Speed to complete one cycle per divisor
+                    10.0 * divisor // Tuned so it looks good
+                } else {
+                    manual_speed
+                } as f32;
+
+                // Collect strip info and update positions
+                let mut strip_positions: Vec<(u64, usize, f32)> = Vec::new();
+
+                for strip in strips.iter() {
+                    if let Some(t) = targets {
+                        if !t.contains(&strip.id) {
+                            continue;
+                        }
+                    }
+
+                    // Find or create pulse state for this strip
+                    let pulse_state = self.pulse_states.iter_mut().find(|p| p.strip_id == strip.id);
+
+                    let position = if let Some(state) = pulse_state {
+                        // Update existing position
+                        let dt = t - state.last_update;
+                        state.last_update = t;
+                        state.position += speed * dt;
+
+                        // Handle wrapping/bouncing based on direction
+                        let strip_len = strip.pixel_count as f32;
+                        match direction {
+                            "Reverse" => {
+                                state.position = state.position % strip_len;
+                                strip_len - state.position
+                            }
+                            "Bounce" => {
+                                let cycle_len = strip_len * 2.0;
+                                let pos_in_cycle = state.position % cycle_len;
+                                if pos_in_cycle < strip_len {
+                                    pos_in_cycle
+                                } else {
+                                    cycle_len - pos_in_cycle
+                                }
+                            }
+                            _ => { // "Forward"
+                                state.position = state.position % strip_len;
+                                state.position
+                            }
+                        }
+                    } else {
+                        // Create new pulse state
+                        self.pulse_states.push(PulseState {
+                            strip_id: strip.id,
+                            position: 0.0,
+                            last_update: t,
+                        });
+                        0.0
+                    };
+
+                    strip_positions.push((strip.id, strip.pixel_count, position));
+                }
+
+                // Now render pulses to strips
+                for (strip_id, pixel_count, position) in strip_positions {
+                    if let Some(strip_mut) = strips.iter_mut().find(|s| s.id == strip_id) {
+                        for i in 0..pixel_count {
+                            let pixel_pos = i as f32;
+                            let distance = (pixel_pos - position).abs();
+
+                            if distance < tail_length {
+                                let intensity = (1.0 - distance / tail_length).powf(decay).clamp(0.0, 1.0);
+                                let r = (color[0] as f32 * intensity) as u8;
+                                let g = (color[1] as f32 * intensity) as u8;
+                                let b = (color[2] as f32 * intensity) as u8;
+
+                                if i < strip_mut.data.len() {
+                                    strip_mut.data[i] = [
+                                        strip_mut.data[i][0].saturating_add(r),
+                                        strip_mut.data[i][1].saturating_add(g),
+                                        strip_mut.data[i][2].saturating_add(b),
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "ZoneAlternate" => {
+                // Parse parameters
+                let group_a: Vec<u64> = effect.params.get("group_a_strips")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let group_b: Vec<u64> = effect.params.get("group_b_strips")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let group_a_color = effect.params.get("group_a_color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([255, 0, 0]);
+
+                let group_b_color = effect.params.get("group_b_color").and_then(|v| {
+                    let arr = v.as_array()?;
+                    Some([arr.get(0)?.as_u64()? as u8,
+                          arr.get(1)?.as_u64()? as u8,
+                          arr.get(2)?.as_u64()? as u8])
+                }).unwrap_or([0, 0, 255]);
+
+                let rate_str = effect.params.get("rate").and_then(|v| v.as_str()).unwrap_or("1/4");
+                let mode = effect.params.get("mode").and_then(|v| v.as_str()).unwrap_or("Swap");
+
+                // Calculate beat phase and determine active group
+                let divisor = match rate_str {
+                    "4 Bar" => 16.0,
+                    "2 Bar" => 8.0,
+                    "1 Bar" => 4.0,
+                    "1/2" => 2.0,
+                    "1/4" => 1.0,
+                    "1/8" => 0.5,
+                    _ => 1.0,
+                };
+                let phase = (beat / divisor).fract();
+                let a_is_active = phase < 0.5;
+
+                // Determine colors based on mode
+                let (color_when_a_active, color_when_b_active) = match mode {
+                    "Pulse" => {
+                        // Pulse mode: active gets color, inactive gets black
+                        if a_is_active {
+                            (group_a_color, [0, 0, 0])
+                        } else {
+                            ([0, 0, 0], group_b_color)
+                        }
+                    }
+                    _ => { // "Swap" mode (default)
+                        // Swap mode: groups trade colors
+                        if a_is_active {
+                            (group_a_color, group_b_color)
+                        } else {
+                            (group_b_color, group_a_color)
+                        }
+                    }
+                };
+
+                // Apply colors to strips based on group membership
+                for strip in strips.iter_mut() {
+                    if let Some(t) = targets {
+                        if !t.contains(&strip.id) {
+                            continue;
+                        }
+                    }
+
+                    let color = if group_a.contains(&strip.id) {
+                        color_when_a_active
+                    } else if group_b.contains(&strip.id) {
+                        color_when_b_active
+                    } else {
+                        continue; // Skip strips not in either group
+                    };
+
+                    for pixel in &mut strip.data {
+                        *pixel = color;
+                    }
+                }
             }
             _ => {}
         }

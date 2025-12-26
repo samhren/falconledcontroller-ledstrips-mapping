@@ -936,6 +936,10 @@ impl eframe::App for MyApp {
                                                             ui.selectable_value(&mut config.effect.kind, "Solid".into(), "Solid");
                                                             ui.selectable_value(&mut config.effect.kind, "Flash".into(), "Flash");
                                                             ui.selectable_value(&mut config.effect.kind, "Sparkle".into(), "Sparkle");
+                                                            ui.selectable_value(&mut config.effect.kind, "ColorWash".into(), "Color Wash");
+                                                            ui.selectable_value(&mut config.effect.kind, "GlitchSparkle".into(), "Glitch Sparkle");
+                                                            ui.selectable_value(&mut config.effect.kind, "PulseWave".into(), "Pulse Wave");
+                                                            ui.selectable_value(&mut config.effect.kind, "ZoneAlternate".into(), "Zone Alternate");
                                                         });
                                                         
                                                     if ui.button("🗑").clicked() {
@@ -1005,6 +1009,215 @@ impl eframe::App for MyApp {
                                                     if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay")).changed() {
                                                         ge.params.insert("decay".into(), decay.into());
                                                     }
+                                                } else if ge.kind == "ColorWash" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color A:");
+                                                        let mut color_a = ge.params.get("color_a").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,0,0]);
+                                                        if color_picker(ui, &mut color_a, format!("ge_cw_a_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("color_a".into(), serde_json::json!([color_a[0], color_a[1], color_a[2]]));
+                                                        }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color B:");
+                                                        let mut color_b = ge.params.get("color_b").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([0u8,0,255]);
+                                                        if color_picker(ui, &mut color_b, format!("ge_cw_b_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("color_b".into(), serde_json::json!([color_b[0], color_b[1], color_b[2]]));
+                                                        }
+                                                    });
+                                                    let mut sync_to_beat = ge.params.get("sync_to_beat").and_then(|v| v.as_bool()).unwrap_or(false);
+                                                    if ui.checkbox(&mut sync_to_beat, "Sync to Beat").changed() {
+                                                        ge.params.insert("sync_to_beat".into(), sync_to_beat.into());
+                                                    }
+                                                    if sync_to_beat {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Rate:");
+                                                            let mut rate = ge.params.get("rate").and_then(|v| v.as_str().map(String::from)).unwrap_or("1 Bar".into());
+                                                            egui::ComboBox::from_id_source(format!("cw_rate_{}_{}", scene.id, eff_idx))
+                                                                .selected_text(&rate)
+                                                                .show_ui(ui, |ui| {
+                                                                    ui.selectable_value(&mut rate, "4 Bar".into(), "4 Bar");
+                                                                    ui.selectable_value(&mut rate, "2 Bar".into(), "2 Bar");
+                                                                    ui.selectable_value(&mut rate, "1 Bar".into(), "1 Bar");
+                                                                    ui.selectable_value(&mut rate, "1/2".into(), "1/2");
+                                                                    ui.selectable_value(&mut rate, "1/4".into(), "1/4");
+                                                                    ui.selectable_value(&mut rate, "1/8".into(), "1/8");
+                                                                });
+                                                            ge.params.insert("rate".into(), serde_json::json!(rate));
+                                                        });
+                                                    } else {
+                                                        let mut period = ge.params.get("period").and_then(|v| v.as_f64()).unwrap_or(4.0);
+                                                        if ui.add(egui::Slider::new(&mut period, 0.5..=20.0).text("Period (s)")).changed() {
+                                                            ge.params.insert("period".into(), period.into());
+                                                        }
+                                                    }
+                                                } else if ge.kind == "GlitchSparkle" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Background:");
+                                                        let mut bg_color = ge.params.get("background_color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([0u8,0,0]);
+                                                        if color_picker(ui, &mut bg_color, format!("ge_gs_bg_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("background_color".into(), serde_json::json!([bg_color[0], bg_color[1], bg_color[2]]));
+                                                        }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Sparkle:");
+                                                        let mut spk_color = ge.params.get("sparkle_color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
+                                                        if color_picker(ui, &mut spk_color, format!("ge_gs_spk_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("sparkle_color".into(), serde_json::json!([spk_color[0], spk_color[1], spk_color[2]]));
+                                                        }
+                                                    });
+                                                    let mut sparkle_rate = ge.params.get("sparkle_rate").and_then(|v| v.as_f64()).unwrap_or(0.01);
+                                                    if ui.add(egui::Slider::new(&mut sparkle_rate, 0.001..=0.1).text("Sparkle Rate").logarithmic(true)).changed() {
+                                                        ge.params.insert("sparkle_rate".into(), sparkle_rate.into());
+                                                    }
+                                                    let mut fade_time = ge.params.get("fade_time").and_then(|v| v.as_f64()).unwrap_or(0.3);
+                                                    if ui.add(egui::Slider::new(&mut fade_time, 0.05..=2.0).text("Fade Time")).changed() {
+                                                        ge.params.insert("fade_time".into(), fade_time.into());
+                                                    }
+                                                    let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
+                                                    if ui.add(egui::Slider::new(&mut decay, 1.0..=20.0).text("Decay")).changed() {
+                                                        ge.params.insert("decay".into(), decay.into());
+                                                    }
+                                                } else if ge.kind == "PulseWave" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color:");
+                                                        let mut color = ge.params.get("color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,255,255]);
+                                                        if color_picker(ui, &mut color, format!("ge_pw_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("color".into(), serde_json::json!([color[0], color[1], color[2]]));
+                                                        }
+                                                    });
+                                                    let mut sync = ge.params.get("sync").and_then(|v| v.as_bool()).unwrap_or(true);
+                                                    if ui.checkbox(&mut sync, "Sync to Beat").changed() {
+                                                        ge.params.insert("sync".into(), sync.into());
+                                                    }
+                                                    if sync {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Rate:");
+                                                            let mut rate = ge.params.get("rate").and_then(|v| v.as_str().map(String::from)).unwrap_or("1/4".into());
+                                                            egui::ComboBox::from_id_source(format!("pw_rate_{}_{}", scene.id, eff_idx))
+                                                                .selected_text(&rate)
+                                                                .show_ui(ui, |ui| {
+                                                                    ui.selectable_value(&mut rate, "4 Bar".into(), "4 Bar");
+                                                                    ui.selectable_value(&mut rate, "2 Bar".into(), "2 Bar");
+                                                                    ui.selectable_value(&mut rate, "1 Bar".into(), "1 Bar");
+                                                                    ui.selectable_value(&mut rate, "1/2".into(), "1/2");
+                                                                    ui.selectable_value(&mut rate, "1/4".into(), "1/4");
+                                                                    ui.selectable_value(&mut rate, "1/8".into(), "1/8");
+                                                                });
+                                                            ge.params.insert("rate".into(), serde_json::json!(rate));
+                                                        });
+                                                    } else {
+                                                        let mut speed = ge.params.get("speed").and_then(|v| v.as_f64()).unwrap_or(5.0);
+                                                        if ui.add(egui::Slider::new(&mut speed, 0.1..=50.0).text("Speed (px/s)")).changed() {
+                                                            ge.params.insert("speed".into(), speed.into());
+                                                        }
+                                                    }
+                                                    let mut tail_length = ge.params.get("tail_length").and_then(|v| v.as_f64()).unwrap_or(10.0);
+                                                    if ui.add(egui::Slider::new(&mut tail_length, 3.0..=50.0).text("Tail Length")).changed() {
+                                                        ge.params.insert("tail_length".into(), tail_length.into());
+                                                    }
+                                                    let mut decay = ge.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(2.0);
+                                                    if ui.add(egui::Slider::new(&mut decay, 1.0..=5.0).text("Decay")).changed() {
+                                                        ge.params.insert("decay".into(), decay.into());
+                                                    }
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Direction:");
+                                                        let mut direction = ge.params.get("direction").and_then(|v| v.as_str().map(String::from)).unwrap_or("Forward".into());
+                                                        egui::ComboBox::from_id_source(format!("pw_dir_{}_{}", scene.id, eff_idx))
+                                                            .selected_text(&direction)
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut direction, "Forward".into(), "Forward");
+                                                                ui.selectable_value(&mut direction, "Reverse".into(), "Reverse");
+                                                                ui.selectable_value(&mut direction, "Bounce".into(), "Bounce");
+                                                            });
+                                                        ge.params.insert("direction".into(), serde_json::json!(direction));
+                                                    });
+                                                } else if ge.kind == "ZoneAlternate" {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Group A:");
+                                                        let mut color_a = ge.params.get("group_a_color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([255u8,0,0]);
+                                                        if color_picker(ui, &mut color_a, format!("ge_za_a_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("group_a_color".into(), serde_json::json!([color_a[0], color_a[1], color_a[2]]));
+                                                        }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Group B:");
+                                                        let mut color_b = ge.params.get("group_b_color").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or([0u8,0,255]);
+                                                        if color_picker(ui, &mut color_b, format!("ge_za_b_{}_{}", scene.id, eff_idx)) {
+                                                            ge.params.insert("group_b_color".into(), serde_json::json!([color_b[0], color_b[1], color_b[2]]));
+                                                        }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Rate:");
+                                                        let mut rate = ge.params.get("rate").and_then(|v| v.as_str().map(String::from)).unwrap_or("1/4".into());
+                                                        egui::ComboBox::from_id_source(format!("za_rate_{}_{}", scene.id, eff_idx))
+                                                            .selected_text(&rate)
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut rate, "4 Bar".into(), "4 Bar");
+                                                                ui.selectable_value(&mut rate, "2 Bar".into(), "2 Bar");
+                                                                ui.selectable_value(&mut rate, "1 Bar".into(), "1 Bar");
+                                                                ui.selectable_value(&mut rate, "1/2".into(), "1/2");
+                                                                ui.selectable_value(&mut rate, "1/4".into(), "1/4");
+                                                                ui.selectable_value(&mut rate, "1/8".into(), "1/8");
+                                                            });
+                                                        ge.params.insert("rate".into(), serde_json::json!(rate));
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Mode:");
+                                                        let mut mode = ge.params.get("mode").and_then(|v| v.as_str().map(String::from)).unwrap_or("Swap".into());
+                                                        egui::ComboBox::from_id_source(format!("za_mode_{}_{}", scene.id, eff_idx))
+                                                            .selected_text(&mode)
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut mode, "Swap".into(), "Swap");
+                                                                ui.selectable_value(&mut mode, "Pulse".into(), "Pulse");
+                                                            });
+                                                        ge.params.insert("mode".into(), serde_json::json!(mode));
+                                                    });
+                                                    egui::CollapsingHeader::new("Assign Strip Groups")
+                                                        .id_source(format!("za_groups_{}_{}", scene.id, eff_idx))
+                                                        .show(ui, |ui| {
+                                                            let mut group_a: Vec<u64> = ge.params.get("group_a_strips")
+                                                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                                                .unwrap_or_default();
+                                                            let mut group_b: Vec<u64> = ge.params.get("group_b_strips")
+                                                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                                                .unwrap_or_default();
+
+                                                            for (strip_idx, strip) in self.state.strips.iter().enumerate() {
+                                                                ui.horizontal(|ui| {
+                                                                    let mut in_a = group_a.contains(&strip.id);
+                                                                    let mut in_b = group_b.contains(&strip.id);
+
+                                                                    if ui.checkbox(&mut in_a, "").changed() {
+                                                                        if in_a {
+                                                                            if !group_a.contains(&strip.id) {
+                                                                                group_a.push(strip.id);
+                                                                            }
+                                                                            group_b.retain(|&id| id != strip.id);
+                                                                        } else {
+                                                                            group_a.retain(|&id| id != strip.id);
+                                                                        }
+                                                                    }
+                                                                    ui.label("Group A");
+
+                                                                    if ui.checkbox(&mut in_b, "").changed() {
+                                                                        if in_b {
+                                                                            if !group_b.contains(&strip.id) {
+                                                                                group_b.push(strip.id);
+                                                                            }
+                                                                            group_a.retain(|&id| id != strip.id);
+                                                                        } else {
+                                                                            group_b.retain(|&id| id != strip.id);
+                                                                        }
+                                                                    }
+                                                                    ui.label("Group B");
+
+                                                                    ui.label(format!("Strip #{}", strip_idx + 1));
+                                                                });
+                                                            }
+
+                                                            ge.params.insert("group_a_strips".into(), serde_json::json!(group_a));
+                                                            ge.params.insert("group_b_strips".into(), serde_json::json!(group_b));
+                                                        });
                                                 } else { // Rainbow / Default
                                                     let mut speed = ge.params.get("speed").and_then(|v| v.as_f64()).unwrap_or(0.2);
                                                     if ui.add(egui::Slider::new(&mut speed, 0.05..=2.0).text("Speed")).changed() {

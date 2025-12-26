@@ -172,15 +172,17 @@ impl Database {
             let global_effect_json = scene.global.as_ref()
                 .map(|g| serde_json::to_string(g))
                 .transpose()?;
+            let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
                     global_effect_json,
+                    global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
                     if scene.launchpad_is_cc { 1 } else { 0 },
                     scene.launchpad_color.map(|v| v as i64),
@@ -448,15 +450,17 @@ impl Database {
             let global_effect_json = scene.global.as_ref()
                 .map(|g| serde_json::to_string(g))
                 .transpose()?;
+            let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
                     global_effect_json,
+                    global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
                     if scene.launchpad_is_cc { 1 } else { 0 },
                     scene.launchpad_color.map(|v| v as i64),
