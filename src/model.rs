@@ -24,6 +24,8 @@ pub struct Scene {
     pub id: u64,
     pub name: String,
     pub kind: String,                  // "Masks" | "Global"
+    #[serde(default = "default_category")]
+    pub category: String,              // User-defined category for organization
     #[serde(default)]
     pub masks: Vec<Mask>,              // used when kind=="Masks"
     pub global: Option<GlobalEffect>,  // DEPRECATED: used only for migration
@@ -35,6 +37,10 @@ pub struct Scene {
     pub launchpad_is_cc: bool,
     #[serde(default)]
     pub launchpad_color: Option<u8>,
+}
+
+fn default_category() -> String {
+    "Uncategorized".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

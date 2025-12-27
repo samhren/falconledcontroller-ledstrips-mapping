@@ -54,6 +54,7 @@ impl Database {
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Uncategorized',
                 global_effect_json TEXT,
                 global_effects_json TEXT,
                 launchpad_btn INTEGER,
@@ -102,9 +103,10 @@ impl Database {
             "#
         )?;
         
-        // Ensure new column exists for existing databases
+        // Ensure new columns exist for existing databases
         // Ignore error if column already exists
         let _ = self.conn.execute("ALTER TABLE scenes ADD COLUMN global_effects_json TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE scenes ADD COLUMN category TEXT NOT NULL DEFAULT 'Uncategorized'", []);
 
         Ok(())
     }
@@ -175,12 +177,13 @@ impl Database {
             let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO scenes (id, name, kind, category, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
+                    scene.category,
                     global_effect_json,
                     global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
@@ -225,7 +228,7 @@ impl Database {
                 layout_locked = ?12
              WHERE id = 1",
             params![
-                state.selected_scene_id,
+                state.selected_scene_id.map(|id| id as i64),
                 if state.network.use_multicast { 1 } else { 0 },
                 state.network.unicast_ip,
                 state.network.universe,
@@ -286,23 +289,24 @@ impl Database {
 
         // Load scenes
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color FROM scenes ORDER BY id"
+            "SELECT id, name, kind, category, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color FROM scenes ORDER BY id"
         )?;
         let scene_rows: Vec<_> = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)? as u64,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
             ))
         })?.collect::<Result<Vec<_>, _>>()?;
 
         let mut scenes = Vec::new();
-        for (id, name, kind, global_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color) in scene_rows {
+        for (id, name, kind, category, global_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color) in scene_rows {
             // Load scene masks
             let mut stmt = self.conn.prepare(
                 "SELECT mask_id, mask_type, x, y, params_json FROM scene_masks WHERE scene_id = ?1 ORDER BY display_order"
@@ -336,6 +340,7 @@ impl Database {
                 id,
                 name,
                 kind,
+                category,
                 masks: scene_masks,
                 global,
                 global_effects,
@@ -367,7 +372,7 @@ impl Database {
             [],
             |row| {
                 Ok((
-                    row.get::<_, Option<u64>>(0)?,
+                    row.get::<_, Option<i64>>(0)?.map(|id| id as u64),
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, u16>(3)?,
@@ -453,12 +458,13 @@ impl Database {
             let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO scenes (id, name, kind, category, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
+                    scene.category,
                     global_effect_json,
                     global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
@@ -503,7 +509,7 @@ impl Database {
                 layout_locked = ?12
              WHERE id = 1",
             params![
-                state.selected_scene_id,
+                state.selected_scene_id.map(|id| id as i64),
                 if state.network.use_multicast { 1 } else { 0 },
                 state.network.unicast_ip,
                 state.network.universe,
@@ -596,12 +602,13 @@ impl Database {
             let global_effects_json = serde_json::to_string(&scene.global_effects)?;
 
             tx.execute(
-                "INSERT INTO scenes (id, name, kind, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO scenes (id, name, kind, category, global_effect_json, global_effects_json, launchpad_btn, launchpad_is_cc, launchpad_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     scene.id as i64,
                     scene.name,
                     scene.kind,
+                    scene.category,
                     global_effect_json,
                     global_effects_json,
                     scene.launchpad_btn.map(|v| v as i64),
@@ -643,7 +650,7 @@ impl Database {
                     layout_locked = ?9
                  WHERE id = 1",
                 params![
-                    import_state.selected_scene_id,
+                    import_state.selected_scene_id.map(|id| id as i64),
                     if import_state.network.use_multicast { 1 } else { 0 },
                     import_state.network.unicast_ip,
                     import_state.network.universe,

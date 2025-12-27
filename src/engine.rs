@@ -61,6 +61,7 @@ pub struct LightingEngine {
     pulse_states: Vec<PulseState>,
     // Glitch Sparkle effect state tracking
     glitch_states: Vec<GlitchPixel>,
+    glitch_sparkle_accumulator: f32,
     // Burst effect radius smoothing per-mask
     burst_radius_states: std::collections::HashMap<u64, f32>,
 }
@@ -111,6 +112,7 @@ impl LightingEngine {
             sparkle_states: Vec::new(),
             pulse_states: Vec::new(),
             glitch_states: Vec::new(),
+            glitch_sparkle_accumulator: 0.0,
             burst_radius_states: std::collections::HashMap::new(),
         }
     }
@@ -1092,7 +1094,7 @@ impl LightingEngine {
                           arr.get(2)?.as_u64()? as u8])
                 }).unwrap_or([255, 255, 255]);
 
-                let sparkle_rate = effect.params.get("sparkle_rate").and_then(|v| v.as_f64()).unwrap_or(0.01) as f32;
+                let density = effect.params.get("density").and_then(|v| v.as_f64()).unwrap_or(0.05) as f32;
                 let fade_time = effect.params.get("fade_time").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
                 let decay = effect.params.get("decay").and_then(|v| v.as_f64()).unwrap_or(5.0);
 
@@ -1111,8 +1113,12 @@ impl LightingEngine {
                     }
                 }
 
-                // Step 2: Spawn new sparkles
+                // Step 2: Spawn new sparkles using accumulator for constant rate
                 if self.glitch_states.len() < MAX_GLITCH_SPARKLES {
+                    // Count total pixels in targeted strips
+                    let mut total_pixels = 0;
+                    let mut eligible_pixels = Vec::new();
+
                     for strip in strips.iter() {
                         if let Some(t) = targets {
                             if !t.contains(&strip.id) {
@@ -1122,18 +1128,40 @@ impl LightingEngine {
 
                         let pixel_count = strip.pixel_count.min(strip.data.len());
                         for i in 0..pixel_count {
-                            if self.glitch_states.len() >= MAX_GLITCH_SPARKLES {
-                                break;
-                            }
-                            if rand::random::<f32>() < sparkle_rate {
-                                self.glitch_states.push(GlitchPixel {
-                                    strip_id: strip.id,
-                                    pixel_index: i,
-                                    birth_time: t,
-                                    color: sparkle_color,
-                                });
-                            }
+                            eligible_pixels.push((strip.id, i));
+                            total_pixels += 1;
                         }
+                    }
+
+                    // Calculate expected sparkles this frame and accumulate
+                    // Density represents target percentage of pixels sparkling at any time
+                    // Adjust spawn rate based on fade_time to maintain constant coverage
+                    let target_coverage = total_pixels as f32 * density;
+                    let spawn_rate_per_second = target_coverage / fade_time.max(0.1);
+                    let fps_estimate = 60.0; // Assume 60fps for spawn rate calculation
+                    let expected_sparkles = spawn_rate_per_second / fps_estimate;
+                    self.glitch_sparkle_accumulator += expected_sparkles;
+
+                    // Spawn whole number of sparkles, keep fractional part
+                    let sparkles_to_spawn = self.glitch_sparkle_accumulator.floor() as usize;
+                    self.glitch_sparkle_accumulator -= sparkles_to_spawn as f32;
+
+                    // Spawn sparkles at random positions
+                    for _ in 0..sparkles_to_spawn.min(MAX_GLITCH_SPARKLES - self.glitch_states.len()) {
+                        if eligible_pixels.is_empty() {
+                            break;
+                        }
+
+                        // Pick a random pixel
+                        let idx = (rand::random::<f32>() * eligible_pixels.len() as f32) as usize % eligible_pixels.len();
+                        let (strip_id, pixel_index) = eligible_pixels[idx];
+
+                        self.glitch_states.push(GlitchPixel {
+                            strip_id,
+                            pixel_index,
+                            birth_time: t,
+                            color: sparkle_color,
+                        });
                     }
                 }
 
