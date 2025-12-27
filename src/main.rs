@@ -467,6 +467,25 @@ impl eframe::App for MyApp {
                          self.state.selected_scene_id = Some(s.id);
                      }
                 }
+                midi::MidiEvent::Connected => {
+                    println!("Launchpad connected! Refreshing button colors...");
+                    // Clear all buttons
+                    let _ = self.midi_sender.send(midi::MidiCommand::ClearAll);
+                    // Resend all scene button colors
+                    for s in &self.state.scenes {
+                        if let (Some(btn), Some(col)) = (s.launchpad_btn, s.launchpad_color) {
+                            let cmd = if s.launchpad_is_cc {
+                                midi::MidiCommand::SetButtonColor { cc: btn, color: col }
+                            } else {
+                                midi::MidiCommand::SetPadColor { note: btn, color: col }
+                            };
+                            let _ = self.midi_sender.send(cmd);
+                        }
+                    }
+                }
+                midi::MidiEvent::Disconnected => {
+                    println!("Launchpad disconnected. Will retry connection...");
+                }
             }
         }
 

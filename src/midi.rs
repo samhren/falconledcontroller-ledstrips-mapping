@@ -7,6 +7,8 @@ use std::time::Duration;
 pub enum MidiEvent {
     NoteOn { note: u8, velocity: u8 },
     ControlChange { controller: u8, value: u8 },
+    Connected,
+    Disconnected,
 }
 
 pub enum MidiCommand {
@@ -18,12 +20,28 @@ pub enum MidiCommand {
 pub fn start_midi_service(tx_to_app: Sender<MidiEvent>) -> Sender<MidiCommand> {
     let (tx_cmd, rx_cmd) = std::sync::mpsc::channel();
 
-    thread::spawn(move || loop {
-        match run_midi_loop(&tx_to_app, &rx_cmd) {
-            Ok(_) => break,
-            Err(e) => {
-                eprintln!("MIDI Error: {:?}. Retrying in 5s...", e);
-                thread::sleep(Duration::from_secs(5));
+    thread::spawn(move || {
+        let mut first_attempt = true;
+        loop {
+            // Send disconnected status
+            if !first_attempt {
+                let _ = tx_to_app.send(MidiEvent::Disconnected);
+            }
+
+            match run_midi_loop(&tx_to_app, &rx_cmd) {
+                Ok(_) => {
+                    println!("MIDI service stopped normally");
+                    break;
+                }
+                Err(e) => {
+                    if first_attempt {
+                        println!("MIDI: Waiting for Launchpad... ({:?})", e);
+                        first_attempt = false;
+                    } else {
+                        println!("MIDI: Launchpad disconnected. Retrying... ({:?})", e);
+                    }
+                    thread::sleep(Duration::from_secs(2));
+                }
             }
         }
     });
@@ -35,61 +53,130 @@ fn run_midi_loop(
     tx_event: &Sender<MidiEvent>,
     rx_cmd: &Receiver<MidiCommand>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut midi_in = MidiInput::new("Lightspeed Input")?;
-    midi_in.ignore(Ignore::None);
-    let midi_out = MidiOutput::new("Lightspeed Output")?;
+    // Try to get ports, with multiple attempts to work around macOS threading issues
+    // CoreMIDI requires a RunLoop (usually main thread) to populate device properties.
+    // We'll retry a few times with delays to give the system a chance.
 
-    let in_ports = midi_in.ports();
-    let out_ports = midi_out.ports();
+    let (midi_in, midi_out, in_ports, out_ports) = {
+        let mut last_attempt = (None, None, vec![], vec![]);
+
+        for attempt in 0..3 {
+            if attempt > 0 {
+                thread::sleep(Duration::from_millis(500));
+            }
+
+            let mut midi_in = MidiInput::new("Lightspeed Input")?;
+            midi_in.ignore(Ignore::None);
+            let midi_out = MidiOutput::new("Lightspeed Output")?;
+
+            let in_ports = midi_in.ports();
+            let out_ports = midi_out.ports();
+
+            // Check if any ports have valid names
+            let has_valid_name = in_ports.iter().any(|p| midi_in.port_name(p).is_ok())
+                || out_ports.iter().any(|p| midi_out.port_name(p).is_ok());
+
+            if has_valid_name {
+                last_attempt = (Some(midi_in), Some(midi_out), in_ports, out_ports);
+                break;
+            }
+
+            last_attempt = (Some(midi_in), Some(midi_out), in_ports, out_ports);
+        }
+
+        let (Some(midi_in), Some(midi_out), in_ports, out_ports) = last_attempt else {
+            return Err("Failed to initialize MIDI".into());
+        };
+
+        (midi_in, midi_out, in_ports, out_ports)
+    };
 
     // List all ports for debugging
     println!("\nAvailable Input Ports:");
     for (i, p) in in_ports.iter().enumerate() {
-        println!("{}: {}", i, midi_in.port_name(p).unwrap_or_default());
+        match midi_in.port_name(p) {
+            Ok(name) => println!("{}: '{}' (len: {})", i, name, name.len()),
+            Err(e) => println!("{}: ERROR - {:?}", i, e),
+        }
     }
     println!("\nAvailable Output Ports:");
     for (i, p) in out_ports.iter().enumerate() {
-        println!("{}: {}", i, midi_out.port_name(p).unwrap_or_default());
+        match midi_out.port_name(p) {
+            Ok(name) => println!("{}: '{}' (len: {})", i, name, name.len()),
+            Err(e) => println!("{}: ERROR - {:?}", i, e),
+        }
     }
 
-    // Smart Selection Logic
+    // Smart Selection Logic - STRICT name matching required
+    // CRITICAL: We MUST skip any port where we can't retrieve the name.
+    // Attempting to connect to a port in "zombie" state (CannotRetrievePortName)
+    // poisons the connection. We let the retry loop wait for the port to fully initialize.
+    //
     // 1. Prefer "Launchpad" AND "MIDI"
     // 2. Prefer "Launchpad" AND NOT "DAW"
     // 3. Fallback to any "Launchpad"
-    
-    // Find Input
+
+    // Find Input - STRICT: only use ports with valid, readable names
     let lp_in = in_ports.iter().find(|p| {
-        let name = midi_in.port_name(p).unwrap_or_default();
+        // Skip ports where we can't get the name (device still initializing)
+        let Ok(name) = midi_in.port_name(p) else {
+            println!("Skipping initializing input device (name unavailable)");
+            return false;
+        };
         name.contains("Launchpad") && (name.contains("MIDI") || name.contains("LPMiniMK3 MIDI"))
     }).or_else(|| {
         in_ports.iter().find(|p| {
-            let name = midi_in.port_name(p).unwrap_or_default();
+            let Ok(name) = midi_in.port_name(p) else {
+                return false;
+            };
             name.contains("Launchpad") && !name.contains("DAW")
         })
     }).or_else(|| {
         in_ports.iter().find(|p| {
-            midi_in.port_name(p).unwrap_or_default().contains("Launchpad")
+            let Ok(name) = midi_in.port_name(p) else {
+                return false;
+            };
+            name.contains("Launchpad")
         })
     });
 
-    // Find Output
+    // Find Output - STRICT: only use ports with valid, readable names
     let lp_out = out_ports.iter().find(|p| {
-        let name = midi_out.port_name(p).unwrap_or_default();
+        // Skip ports where we can't get the name (device still initializing)
+        let Ok(name) = midi_out.port_name(p) else {
+            println!("Skipping initializing output device (name unavailable)");
+            return false;
+        };
         name.contains("Launchpad") && (name.contains("MIDI") || name.contains("LPMiniMK3 MIDI"))
     }).or_else(|| {
         out_ports.iter().find(|p| {
-            let name = midi_out.port_name(p).unwrap_or_default();
+            let Ok(name) = midi_out.port_name(p) else {
+                return false;
+            };
             name.contains("Launchpad") && !name.contains("DAW")
         })
     }).or_else(|| {
         out_ports.iter().find(|p| {
-            midi_out.port_name(p).unwrap_or_default().contains("Launchpad")
+            let Ok(name) = midi_out.port_name(p) else {
+                return false;
+            };
+            name.contains("Launchpad")
         })
     });
+
+    if lp_in.is_none() {
+        println!("No valid Launchpad found in {} input ports (waiting for device to initialize...)", in_ports.len());
+    }
+    if lp_out.is_none() {
+        println!("No valid Launchpad found in {} output ports (waiting for device to initialize...)", out_ports.len());
+    }
 
     if let (Some(in_port), Some(out_port)) = (lp_in, lp_out) {
-        println!("Selected Launchpad Input: {}", midi_in.port_name(in_port)?);
-        println!("Selected Launchpad Output: {}", midi_out.port_name(out_port)?);
+        let in_name = midi_in.port_name(in_port).unwrap_or_else(|_| "Unknown".to_string());
+        let out_name = midi_out.port_name(out_port).unwrap_or_else(|_| "Unknown".to_string());
+        println!("Selected Launchpad Input: {}", in_name);
+        println!("Selected Launchpad Output: {}", out_name);
+
         let tx = tx_event.clone();
 
         let _conn_in = midi_in.connect(
@@ -130,6 +217,12 @@ fn run_midi_loop(
         conn_out.send(&[0xF0, 0x00, 0x20, 0x29, 0x02, 0x0D, 0x0E, 0x01, 0xF7])?;
 
         println!("Launchpad Programmer Mode Enabled");
+
+        // Give Launchpad a moment to enter programmer mode
+        thread::sleep(Duration::from_millis(100));
+
+        // Now send connected event - Launchpad is ready for commands
+        let _ = tx_event.send(MidiEvent::Connected);
 
         // Loop dealing with outgoing commands
         loop {
