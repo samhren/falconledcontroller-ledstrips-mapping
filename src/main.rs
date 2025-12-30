@@ -1713,35 +1713,13 @@ impl eframe::App for MyApp {
                                         ui.push_id(m.id, |ui| {
                                             ui.collapsing(format!("{} Mask::{}", m.mask_type, m.id), |ui| {
                                                 ui.horizontal(|ui| {
-                                                    ui.label("Pos:");
-                                                    ui.add(egui::Slider::new(&mut m.x, 0.0..=1.0).text("X"));
-                                                    ui.add(egui::Slider::new(&mut m.y, 0.0..=1.0).text("Y"));
-                                                    if ui.button("🗑").clicked() {
+                                                    if ui.button("🗑 Delete").clicked() {
                                                         delete_mask_idx = Some(idx);
                                                     }
                                                 });
                                     
                                     // DYNAMIC PARAMS
                                     if m.mask_type == "scanner" {
-                                        // Width
-                                        let mut w = m.params.get("width").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                                        if ui.add(egui::Slider::new(&mut w, 0.0..=50.0).text("Width")).changed() {
-                                            m.params.insert("width".into(), w.into());
-                                            needs_save = true;
-                                        }
-                                        if lfo_controls(ui, &mut m.params, "width", format!("width_lfo_{}", m.id)) {
-                                            needs_save = true;
-                                        }
-                                        // Height
-                                        let mut h = m.params.get("height").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                                        if ui.add(egui::Slider::new(&mut h, 0.0..=50.0).text("Height")).changed() {
-                                            m.params.insert("height".into(), h.into());
-                                            needs_save = true;
-                                        }
-                                        if lfo_controls(ui, &mut m.params, "height", format!("height_lfo_{}", m.id)) {
-                                            needs_save = true;
-                                        }
-                                        
                                         // Hard Edge
                                         let mut hard_edge = m.params.get("hard_edge").and_then(|v| v.as_bool()).unwrap_or(false);
                                         if ui.checkbox(&mut hard_edge, "Hard Edge").changed() {
@@ -2605,11 +2583,6 @@ impl eframe::App for MyApp {
                 // Background
                 painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(15, 15, 18));
                 
-                // Grid (infinite)
-                let grid_spacing = 0.1 * rect.width() * self.view.scale;
-                if grid_spacing > 5.0 { 
-                     // Only draw if dense enough
-                }
                 
                 // Draw bounds (Fit to strips)
                 let mut b_min_x: f32 = if self.state.strips.is_empty() { 0.0 } else { f32::MAX };
@@ -2635,9 +2608,141 @@ impl eframe::App for MyApp {
                     }
                 }
                 
-                let tl = to_screen(b_min_x, b_min_y, &self.view);
-                let br = to_screen(b_max_x, b_max_y, &self.view);
-                painter.rect_stroke(egui::Rect::from_min_max(tl, br), 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+                // Calculate bounds dimensions for grid
+                let bounds_width = b_max_x - b_min_x;
+                let bounds_height = b_max_y - b_min_y;
+
+                // Only draw grid if we have strips
+                if !self.state.strips.is_empty() && bounds_width > 0.0 {
+                    // Get visible world coordinates (canvas corners)
+                    let (visible_min_x, visible_min_y) = from_screen(rect.left_top(), &self.view);
+                    let (visible_max_x, visible_max_y) = from_screen(rect.right_bottom(), &self.view);
+
+                    // Grid colors - visible but subtle
+                    let grid_color_major = egui::Color32::from_rgba_unmultiplied(70, 70, 70, 180);    // Full units
+                    let grid_color_half = egui::Color32::from_rgba_unmultiplied(55, 55, 55, 140);     // Half units
+                    let grid_color_quarter = egui::Color32::from_rgba_unmultiplied(45, 45, 45, 110);  // Quarter units
+                    let grid_color_minor = egui::Color32::from_rgba_unmultiplied(38, 38, 38, 80);     // Smaller
+
+                    let target_min_pixels = 25.0;
+                    let target_max_pixels = 80.0;
+
+                    // X GRID (vertical lines) - based on LED bounds width
+                    let grid_unit_x = bounds_width;
+                    let unit_pixels_x = grid_unit_x * rect.width() * self.view.scale;
+
+                    let mut subdivisions_x = 1;
+                    while unit_pixels_x / (subdivisions_x as f32) > target_max_pixels && subdivisions_x < 128 {
+                        subdivisions_x *= 2;
+                    }
+                    while unit_pixels_x / (subdivisions_x as f32) < target_min_pixels && subdivisions_x > 1 {
+                        subdivisions_x /= 2;
+                    }
+                    let cell_size_x = grid_unit_x / subdivisions_x as f32;
+
+                    let start_x = b_min_x + ((visible_min_x - b_min_x) / cell_size_x).floor() * cell_size_x;
+                    let end_x = b_min_x + ((visible_max_x - b_min_x) / cell_size_x).ceil() * cell_size_x;
+
+                    // Draw vertical grid lines
+                    let mut x = start_x;
+                    while x <= end_x {
+                        let top = to_screen(x, visible_min_y, &self.view);
+                        let bottom = to_screen(x, visible_max_y, &self.view);
+
+                        let rel_x = x - b_min_x;
+                        let units_from_origin = rel_x / grid_unit_x;
+
+                        let is_full_unit = (units_from_origin - units_from_origin.round()).abs() < 0.0001;
+                        let is_half_unit = ((units_from_origin * 2.0) - (units_from_origin * 2.0).round()).abs() < 0.0001;
+                        let is_quarter_unit = ((units_from_origin * 4.0) - (units_from_origin * 4.0).round()).abs() < 0.0001;
+
+                        let (stroke_width, color) = if is_full_unit {
+                            (1.0, grid_color_major)
+                        } else if is_half_unit {
+                            (0.75, grid_color_half)
+                        } else if is_quarter_unit {
+                            (0.5, grid_color_quarter)
+                        } else {
+                            (0.5, grid_color_minor)
+                        };
+
+                        painter.line_segment([top, bottom], egui::Stroke::new(stroke_width, color));
+
+                        // Draw labels at significant positions
+                        let label_pixels = cell_size_x * rect.width() * self.view.scale;
+                        if label_pixels > 60.0 && is_quarter_unit && top.y > rect.top() + 5.0 {
+                            let frac = units_from_origin;
+                            let label = if (frac - frac.round()).abs() < 0.001 {
+                                if frac.round() as i32 == 0 { None } else { Some(format!("{}", frac.round() as i32)) }
+                            } else if ((frac * 2.0) - (frac * 2.0).round()).abs() < 0.001 {
+                                let n = (frac * 2.0).round() as i32;
+                                if n % 2 == 0 { None } else { Some(format!("{}/2", n)) }
+                            } else if ((frac * 4.0) - (frac * 4.0).round()).abs() < 0.001 {
+                                let n = (frac * 4.0).round() as i32;
+                                if n % 2 == 0 { None } else { Some(format!("{}/4", n)) }
+                            } else {
+                                None
+                            };
+
+                            if let Some(text) = label {
+                                painter.text(
+                                    egui::pos2(top.x + 3.0, rect.top() + 5.0),
+                                    egui::Align2::LEFT_TOP,
+                                    text,
+                                    egui::FontId::proportional(10.0),
+                                    egui::Color32::from_rgba_unmultiplied(140, 140, 140, 180),
+                                );
+                            }
+                        }
+
+                        x += cell_size_x;
+                    }
+
+                    // Y GRID (horizontal lines) - based on LED bounds height
+                    // Use bounds_height if meaningful, otherwise fall back to bounds_width
+                    let grid_unit_y = if bounds_height > 0.001 { bounds_height } else { bounds_width };
+                    let unit_pixels_y = grid_unit_y * rect.height() * self.view.scale;
+
+                    let mut subdivisions_y = 1;
+                    while unit_pixels_y / (subdivisions_y as f32) > target_max_pixels && subdivisions_y < 128 {
+                        subdivisions_y *= 2;
+                    }
+                    while unit_pixels_y / (subdivisions_y as f32) < target_min_pixels && subdivisions_y > 1 {
+                        subdivisions_y /= 2;
+                    }
+                    let cell_size_y = grid_unit_y / subdivisions_y as f32;
+
+                    let start_y = b_min_y + ((visible_min_y - b_min_y) / cell_size_y).floor() * cell_size_y;
+                    let end_y = b_min_y + ((visible_max_y - b_min_y) / cell_size_y).ceil() * cell_size_y;
+
+                    // Draw horizontal grid lines
+                    let mut y = start_y;
+                    while y <= end_y {
+                        let left = to_screen(visible_min_x, y, &self.view);
+                        let right = to_screen(visible_max_x, y, &self.view);
+
+                        let rel_y = y - b_min_y;
+                        let units_from_origin = rel_y / grid_unit_y;
+
+                        let is_full_unit = (units_from_origin - units_from_origin.round()).abs() < 0.0001;
+                        let is_half_unit = ((units_from_origin * 2.0) - (units_from_origin * 2.0).round()).abs() < 0.0001;
+                        let is_quarter_unit = ((units_from_origin * 4.0) - (units_from_origin * 4.0).round()).abs() < 0.0001;
+
+                        let (stroke_width, color) = if is_full_unit {
+                            (1.0, grid_color_major)
+                        } else if is_half_unit {
+                            (0.75, grid_color_half)
+                        } else if is_quarter_unit {
+                            (0.5, grid_color_quarter)
+                        } else {
+                            (0.5, grid_color_minor)
+                        };
+
+                        painter.line_segment([left, right], egui::Stroke::new(stroke_width, color));
+
+                        y += cell_size_y;
+                    }
+                }
 
                 // Strips
                 for s in &self.state.strips {
