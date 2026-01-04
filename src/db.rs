@@ -89,6 +89,7 @@ impl Database {
                 audio_hybrid_sync INTEGER NOT NULL DEFAULT 0,
                 audio_sensitivity REAL NOT NULL DEFAULT 0.5,
                 layout_locked INTEGER NOT NULL DEFAULT 0,
+                midi_enabled INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (selected_scene_id) REFERENCES scenes(id) ON DELETE SET NULL
             );
 
@@ -107,6 +108,7 @@ impl Database {
         // Ignore error if column already exists
         let _ = self.conn.execute("ALTER TABLE scenes ADD COLUMN global_effects_json TEXT", []);
         let _ = self.conn.execute("ALTER TABLE scenes ADD COLUMN category TEXT NOT NULL DEFAULT 'Uncategorized'", []);
+        let _ = self.conn.execute("ALTER TABLE app_config ADD COLUMN midi_enabled INTEGER NOT NULL DEFAULT 1", []);
 
         Ok(())
     }
@@ -225,7 +227,8 @@ impl Database {
                 audio_use_flywheel = ?9,
                 audio_hybrid_sync = ?10,
                 audio_sensitivity = ?11,
-                layout_locked = ?12
+                layout_locked = ?12,
+                midi_enabled = ?13
              WHERE id = 1",
             params![
                 state.selected_scene_id.map(|id| id as i64),
@@ -240,6 +243,7 @@ impl Database {
                 if state.audio.hybrid_sync { 1 } else { 0 },
                 state.audio.sensitivity,
                 if state.layout_locked { 1 } else { 0 },
+                if state.midi_enabled { 1 } else { 0 },
             ],
         )?;
 
@@ -364,10 +368,11 @@ impl Database {
             audio_hybrid_sync,
             audio_sensitivity,
             layout_locked,
+            midi_enabled,
         ) = self.conn.query_row(
             "SELECT selected_scene_id, network_use_multicast, network_unicast_ip, network_universe,
                     bind_address, mode, effect, audio_latency_ms, audio_use_flywheel,
-                    audio_hybrid_sync, audio_sensitivity, layout_locked
+                    audio_hybrid_sync, audio_sensitivity, layout_locked, midi_enabled
              FROM app_config WHERE id = 1",
             [],
             |row| {
@@ -384,6 +389,7 @@ impl Database {
                     row.get::<_, i64>(9)?,
                     row.get::<_, f32>(10)?,
                     row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             }
         )?;
@@ -408,6 +414,7 @@ impl Database {
             mode,
             effect,
             layout_locked: layout_locked != 0,
+            midi_enabled: midi_enabled != 0,
         })
     }
 
@@ -506,7 +513,8 @@ impl Database {
                 audio_use_flywheel = ?9,
                 audio_hybrid_sync = ?10,
                 audio_sensitivity = ?11,
-                layout_locked = ?12
+                layout_locked = ?12,
+                midi_enabled = ?13
              WHERE id = 1",
             params![
                 state.selected_scene_id.map(|id| id as i64),
@@ -521,6 +529,7 @@ impl Database {
                 if state.audio.hybrid_sync { 1 } else { 0 },
                 state.audio.sensitivity,
                 if state.layout_locked { 1 } else { 0 },
+                if state.midi_enabled { 1 } else { 0 },
             ],
         )?;
 
@@ -647,7 +656,8 @@ impl Database {
                     audio_use_flywheel = ?6,
                     audio_hybrid_sync = ?7,
                     audio_sensitivity = ?8,
-                    layout_locked = ?9
+                    layout_locked = ?9,
+                    midi_enabled = ?10
                  WHERE id = 1",
                 params![
                     import_state.selected_scene_id.map(|id| id as i64),
@@ -659,6 +669,7 @@ impl Database {
                     if import_state.audio.hybrid_sync { 1 } else { 0 },
                     import_state.audio.sensitivity,
                     if import_state.layout_locked { 1 } else { 0 },
+                    if import_state.midi_enabled { 1 } else { 0 },
                 ],
             )?;
         }

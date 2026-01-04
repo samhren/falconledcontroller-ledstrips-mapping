@@ -457,41 +457,48 @@ impl eframe::App for MyApp {
         });
 
         // 1. Detection Logic (Runs on Main Thread)
-        let now = std::time::Instant::now();
-        let should_check = self.last_midi_detection
-            .map(|t| now.duration_since(t) > std::time::Duration::from_secs(2))
-            .unwrap_or(true);
+        // Only run MIDI detection if midi_enabled is true
+        if self.state.midi_enabled {
+            let now = std::time::Instant::now();
+            let should_check = self.last_midi_detection
+                .map(|t| now.duration_since(t) > std::time::Duration::from_secs(2))
+                .unwrap_or(true);
 
-        if should_check {
-            self.last_midi_detection = Some(now);
+            if should_check {
+                self.last_midi_detection = Some(now);
 
-            if !self.midi_connected {
-                // DETECT
-                if let Some(payload) = midi::detect_launchpad() {
-                    println!("Launchpad detected on Main Thread! Handing off to worker...");
-                    let _ = self.midi_sender.send(midi::MidiCommand::Connect(Box::new(payload)));
-                    self.midi_connected = true; 
-                }
-            } else {
-                // WATCHDOG: Check if still connected
-                // We create a temporary input to check ports.
-                // This is lightweight enough to do every few seconds.
-                let is_present = if let Ok(mut watcher) = midir::MidiInput::new("Watchdog") {
-                    watcher.ignore(midir::Ignore::None);
-                    watcher.ports().iter().any(|p| {
-                        let name = watcher.port_name(p).unwrap_or_default();
-                        name.contains("Launchpad")
-                    })
+                if !self.midi_connected {
+                    // DETECT
+                    if let Some(payload) = midi::detect_launchpad() {
+                        println!("Launchpad detected on Main Thread! Handing off to worker...");
+                        let _ = self.midi_sender.send(midi::MidiCommand::Connect(Box::new(payload)));
+                        self.midi_connected = true;
+                    }
                 } else {
-                    false 
-                };
+                    // WATCHDOG: Check if still connected
+                    // We create a temporary input to check ports.
+                    // This is lightweight enough to do every few seconds.
+                    let is_present = if let Ok(mut watcher) = midir::MidiInput::new("Watchdog") {
+                        watcher.ignore(midir::Ignore::None);
+                        watcher.ports().iter().any(|p| {
+                            let name = watcher.port_name(p).unwrap_or_default();
+                            name.contains("Launchpad")
+                        })
+                    } else {
+                        false
+                    };
 
-                if !is_present {
-                    println!("Watchdog: Launchpad disappeared from port list. Disconnecting...");
-                    let _ = self.midi_sender.send(midi::MidiCommand::Disconnect);
-                    self.midi_connected = false;
+                    if !is_present {
+                        println!("Watchdog: Launchpad disappeared from port list. Disconnecting...");
+                        let _ = self.midi_sender.send(midi::MidiCommand::Disconnect);
+                        self.midi_connected = false;
+                    }
                 }
             }
+        } else if self.midi_connected {
+            // MIDI was disabled while connected - disconnect
+            let _ = self.midi_sender.send(midi::MidiCommand::Disconnect);
+            self.midi_connected = false;
         }
 
         // Handle MIDI Input
@@ -898,6 +905,10 @@ impl eframe::App for MyApp {
                                 if self.state.audio.hybrid_sync {
                                      ui.add(egui::Slider::new(&mut self.state.audio.sensitivity, 0.0..=1.0).text("Sens"));
                                 }
+                            });
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.state.midi_enabled, "Enable MIDI (Launchpad)");
                             });
                         });
                         
@@ -2400,6 +2411,70 @@ impl eframe::App for MyApp {
                    }
                 }
                 
+                // Calculate bounds and grid cell sizes for snapping
+                let mut snap_b_min_x: f32 = if self.state.strips.is_empty() { 0.0 } else { f32::MAX };
+                let mut snap_b_min_y: f32 = if self.state.strips.is_empty() { 0.0 } else { f32::MAX };
+                let mut snap_b_max_x: f32 = if self.state.strips.is_empty() { 1.0 } else { f32::MIN };
+                let mut snap_b_max_y: f32 = if self.state.strips.is_empty() { 1.0 } else { f32::MIN };
+                for s in &self.state.strips {
+                    snap_b_min_x = snap_b_min_x.min(s.x);
+                    snap_b_min_y = snap_b_min_y.min(s.y);
+                    snap_b_max_x = snap_b_max_x.max(s.x);
+                    snap_b_max_y = snap_b_max_y.max(s.y);
+                    if s.pixel_count > 1 {
+                        let tail_x = s.x + (s.pixel_count - 1) as f32 * s.spacing;
+                        snap_b_min_x = snap_b_min_x.min(tail_x);
+                        snap_b_max_x = snap_b_max_x.max(tail_x);
+                    }
+                }
+                let snap_bounds_width = snap_b_max_x - snap_b_min_x;
+                let snap_bounds_height = snap_b_max_y - snap_b_min_y;
+
+                // Calculate grid cell sizes (same logic as rendering)
+                let (cell_size_x, cell_size_y) = if !self.state.strips.is_empty() && snap_bounds_width > 0.0 {
+                    let target_min_pixels = 25.0;
+                    let target_max_pixels = 80.0;
+
+                    let grid_unit_x = snap_bounds_width;
+                    let unit_pixels_x = grid_unit_x * rect.width() * self.view.scale;
+                    let mut subdivisions_x = 1;
+                    while unit_pixels_x / (subdivisions_x as f32) > target_max_pixels && subdivisions_x < 128 {
+                        subdivisions_x *= 2;
+                    }
+                    while unit_pixels_x / (subdivisions_x as f32) < target_min_pixels && subdivisions_x > 1 {
+                        subdivisions_x /= 2;
+                    }
+
+                    let grid_unit_y = if snap_bounds_height > 0.001 { snap_bounds_height } else { snap_bounds_width };
+                    let unit_pixels_y = grid_unit_y * rect.height() * self.view.scale;
+                    let mut subdivisions_y = 1;
+                    while unit_pixels_y / (subdivisions_y as f32) > target_max_pixels && subdivisions_y < 128 {
+                        subdivisions_y *= 2;
+                    }
+                    while unit_pixels_y / (subdivisions_y as f32) < target_min_pixels && subdivisions_y > 1 {
+                        subdivisions_y /= 2;
+                    }
+
+                    (grid_unit_x / subdivisions_x as f32, grid_unit_y / subdivisions_y as f32)
+                } else {
+                    (0.1, 0.1) // Default if no strips
+                };
+
+                // Snap helper functions
+                let snap_to_grid_x = |x: f32| -> f32 {
+                    let rel = x - snap_b_min_x;
+                    let snapped_rel = (rel / cell_size_x).round() * cell_size_x;
+                    snap_b_min_x + snapped_rel
+                };
+                let snap_to_grid_y = |y: f32| -> f32 {
+                    let rel = y - snap_b_min_y;
+                    let snapped_rel = (rel / cell_size_y).round() * cell_size_y;
+                    snap_b_min_y + snapped_rel
+                };
+
+                // Check if shift is held (disables snapping)
+                let shift_held = input.modifiers.shift;
+
                 if response.dragged() {
                     let delta = response.drag_delta(); // screen pixels
 
@@ -2414,10 +2489,9 @@ impl eframe::App for MyApp {
                                   s.y += dy;
                              }
                          } else if self.view.drag_type == DragType::Mask {
-                             // Keep Mask parameter move simple (normalized)
+                             // Move mask (snapping happens on release)
                              let dx = delta.x / (rect.width() * self.view.scale);
                              let dy = delta.y / (rect.height() * self.view.scale);
-                             // Move mask in selected scene if active
                              if let Some(sel) = self.state.selected_scene_id {
                                  if let Some(scene_index) = self.state.scenes.iter().position(|s| s.id == sel && s.kind == "Masks") {
                                      if let Some(m) = self.state.scenes[scene_index].masks.iter_mut().find(|m| Some(m.id) == self.view.drag_id) {
@@ -2459,13 +2533,13 @@ impl eframe::App for MyApp {
                                                                    _ => {} }
                                                   let new_w = new_w_scr / (rect.width() * self.view.scale);
                                                   let new_h = new_h_scr / (rect.height() * self.view.scale);
-                                                  m.params.insert("width".to_string(), new_w.into());
-                                                  m.params.insert("height".to_string(), new_h.into());
                                                   let wx_shift_scr = shift_lx_scr * cos_r - shift_ly_scr * sin_r;
                                                   let wy_shift_scr = shift_lx_scr * sin_r + shift_ly_scr * cos_r;
                                                   let wx_shift_norm = wx_shift_scr / (rect.width() * self.view.scale);
                                                   let wy_shift_norm = wy_shift_scr / (rect.height() * self.view.scale);
                                                   m.x += wx_shift_norm; m.y += wy_shift_norm;
+                                                  m.params.insert("width".to_string(), new_w.max(0.01).into());
+                                                  m.params.insert("height".to_string(), new_h.max(0.01).into());
                                               },
                                               "radial" => {
                                                   let r = m.params.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
@@ -2494,26 +2568,26 @@ impl eframe::App for MyApp {
                                                   let mut new_h_scr = h_scr;
                                                   let mut shift_lx_scr = 0.0;
                                                   let mut shift_ly_scr = 0.0;
-                                                  match edge_idx { 
+                                                  match edge_idx {
                                                       0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = -(new_h_scr - h_scr) / 2.0; },
                                                       1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = (new_w_scr - w_scr) / 2.0; },
                                                       2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = (new_h_scr - h_scr) / 2.0; },
                                                       3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = -(new_w_scr - w_scr) / 2.0; },
-                                                      _ => {} 
+                                                      _ => {}
                                                   }
                                                   let new_w = new_w_scr / (rect.width() * self.view.scale);
                                                   let new_h = new_h_scr / (rect.height() * self.view.scale);
-                                                  m.params.insert("width".to_string(), new_w.into());
-                                                  m.params.insert("height".to_string(), new_h.into());
                                                   let wx_shift_scr = shift_lx_scr * cos_r - shift_ly_scr * sin_r;
                                                   let wy_shift_scr = shift_lx_scr * sin_r + shift_ly_scr * cos_r;
                                                   let wx_shift_norm = wx_shift_scr / (rect.width() * self.view.scale);
                                                   let wy_shift_norm = wy_shift_scr / (rect.height() * self.view.scale);
                                                   m.x += wx_shift_norm; m.y += wy_shift_norm;
+                                                  m.params.insert("width".to_string(), new_w.max(0.01).into());
+                                                  m.params.insert("height".to_string(), new_h.max(0.01).into());
                                               },
                                               "radial" => {
                                                   let r = m.params.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
-                                                  let dr_scr = delta.x; 
+                                                  let dr_scr = delta.x;
                                                   let dr_norm = dr_scr / (rect.width() * self.view.scale);
                                                   m.params.insert("radius".to_string(), (r + dr_norm).max(0.01).into());
                                               },
@@ -2538,26 +2612,26 @@ impl eframe::App for MyApp {
                                               let mut new_h_scr = h_scr;
                                               let mut shift_lx_scr = 0.0;
                                               let mut shift_ly_scr = 0.0;
-                                              match edge_idx { 
+                                              match edge_idx {
                                                   0 => { new_h_scr = (h_scr - ldy_scr).max(1.0); shift_ly_scr = -(new_h_scr - h_scr) / 2.0; },
                                                   1 => { new_w_scr = (w_scr + ldx_scr).max(1.0); shift_lx_scr = (new_w_scr - w_scr) / 2.0; },
                                                   2 => { new_h_scr = (h_scr + ldy_scr).max(1.0); shift_ly_scr = (new_h_scr - h_scr) / 2.0; },
                                                   3 => { new_w_scr = (w_scr - ldx_scr).max(1.0); shift_lx_scr = -(new_w_scr - w_scr) / 2.0; },
-                                                  _ => {} 
+                                                  _ => {}
                                               }
                                               let new_w = new_w_scr / (rect.width() * self.view.scale);
                                               let new_h = new_h_scr / (rect.height() * self.view.scale);
-                                              m.params.insert("width".to_string(), new_w.into());
-                                              m.params.insert("height".to_string(), new_h.into());
                                               let wx_shift_scr = shift_lx_scr * cos_r - shift_ly_scr * sin_r;
                                               let wy_shift_scr = shift_lx_scr * sin_r + shift_ly_scr * cos_r;
                                               let wx_shift_norm = wx_shift_scr / (rect.width() * self.view.scale);
                                               let wy_shift_norm = wy_shift_scr / (rect.height() * self.view.scale);
                                               m.x += wx_shift_norm; m.y += wy_shift_norm;
+                                              m.params.insert("width".to_string(), new_w.max(0.01).into());
+                                              m.params.insert("height".to_string(), new_h.max(0.01).into());
                                           },
                                           "radial" => {
                                               let r = m.params.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
-                                              let dr_scr = delta.x; 
+                                              let dr_scr = delta.x;
                                               let dr_norm = dr_scr / (rect.width() * self.view.scale);
                                               m.params.insert("radius".to_string(), (r + dr_norm).max(0.01).into());
                                           },
@@ -2574,6 +2648,78 @@ impl eframe::App for MyApp {
                 }
                 
                 if response.drag_released() {
+                    // Apply snapping on release (if shift not held)
+                    if !shift_held && self.view.drag_id.is_some() {
+                        let drag_id = self.view.drag_id;
+                        let drag_type = self.view.drag_type;
+
+                        // Helper to snap mask position (for move)
+                        let snap_mask_position = |m: &mut crate::model::Mask| {
+                            // Snap center to nearest grid intersection
+                            m.x = snap_to_grid_x(m.x);
+                            m.y = snap_to_grid_y(m.y);
+                        };
+
+                        // Helper to snap mask edge (for resize)
+                        let snap_mask_edge = |m: &mut crate::model::Mask, edge_idx: usize| {
+                            let w = m.params.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
+                            let h = m.params.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
+
+                            match edge_idx {
+                                0 => { // Top edge - snap top Y to grid
+                                    let top_y = m.y - h / 2.0;
+                                    let snapped_top = snap_to_grid_y(top_y);
+                                    let new_h = h + (top_y - snapped_top);
+                                    m.y = snapped_top + new_h / 2.0;
+                                    m.params.insert("height".to_string(), new_h.max(0.01).into());
+                                },
+                                1 => { // Right edge - snap right X to grid
+                                    let right_x = m.x + w / 2.0;
+                                    let snapped_right = snap_to_grid_x(right_x);
+                                    let new_w = w + (snapped_right - right_x);
+                                    m.x = snapped_right - new_w / 2.0;
+                                    m.params.insert("width".to_string(), new_w.max(0.01).into());
+                                },
+                                2 => { // Bottom edge - snap bottom Y to grid
+                                    let bottom_y = m.y + h / 2.0;
+                                    let snapped_bottom = snap_to_grid_y(bottom_y);
+                                    let new_h = h + (snapped_bottom - bottom_y);
+                                    m.y = snapped_bottom - new_h / 2.0;
+                                    m.params.insert("height".to_string(), new_h.max(0.01).into());
+                                },
+                                3 => { // Left edge - snap left X to grid
+                                    let left_x = m.x - w / 2.0;
+                                    let snapped_left = snap_to_grid_x(left_x);
+                                    let new_w = w + (left_x - snapped_left);
+                                    m.x = snapped_left + new_w / 2.0;
+                                    m.params.insert("width".to_string(), new_w.max(0.01).into());
+                                },
+                                _ => {}
+                            }
+                        };
+
+                        // Find the mask and apply appropriate snapping
+                        let apply_snap = |m: &mut crate::model::Mask| {
+                            match drag_type {
+                                DragType::Mask => snap_mask_position(m),
+                                DragType::ResizeMask(edge_idx) => snap_mask_edge(m, edge_idx),
+                                _ => {}
+                            }
+                        };
+
+                        if let Some(sel) = self.state.selected_scene_id {
+                            if let Some(scene_index) = self.state.scenes.iter().position(|s| s.id == sel && s.kind == "Masks") {
+                                if let Some(m) = self.state.scenes[scene_index].masks.iter_mut().find(|m| Some(m.id) == drag_id) {
+                                    apply_snap(m);
+                                }
+                            } else if let Some(m) = self.state.masks.iter_mut().find(|m| Some(m.id) == drag_id) {
+                                apply_snap(m);
+                            }
+                        } else if let Some(m) = self.state.masks.iter_mut().find(|m| Some(m.id) == drag_id) {
+                            apply_snap(m);
+                        }
+                    }
+
                     self.view.drag_id = None;
                     self.view.drag_type = DragType::None;
                     self.mark_state_changed();

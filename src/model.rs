@@ -142,4 +142,10 @@ pub struct AppState {
     pub audio: AudioConfig,
     #[serde(default)]
     pub layout_locked: bool,
+    #[serde(default = "default_midi_enabled")]
+    pub midi_enabled: bool,
+}
+
+fn default_midi_enabled() -> bool {
+    true
 }
